@@ -1,4 +1,4 @@
-// 职责: 验证全选跨页、默认排除阶梯价和已勾选报价在后台刷新时的保护。
+// 职责: 验证跨页全选、手机端阶梯价选择和已勾选报价在后台刷新时的保护。
 // 关联文件:
 //   frontend/src/features/models/components/models-catalog-import.tsx
 //   frontend/src/features/models/components/models-catalog-prices.tsx
@@ -14,37 +14,54 @@ test('a filtered batch keeps the quotes originally reviewed across a background 
   let reads = 0;
   type Selection = { quoteVersions: string[]; prices: { field: string; action: string; tier?: string }[] };
   let applied: Selection[] = [];
-  await page.route('**/admin/graphql', async route => {
+  await page.route('**/admin/graphql', async (route) => {
     const body = route.request().postDataJSON();
     if (body.operationName === 'OnboardingInfo') {
-      return route.fulfill({json:{data:{onboardingInfo:{onboarded:true,systemModelSetting:{onboarded:true},autoDisableChannel:{onboarded:true}}}}});
+      const onboardingInfo = { onboarded: true, systemModelSetting: { onboarded: true }, autoDisableChannel: { onboarded: true } };
+      return route.fulfill({ json: { data: { onboardingInfo } } });
     }
     if (body.operationName === 'ApplyCatalogImport') {
       applied = body.variables.selections;
-      return route.fulfill({json:{data:{applyCatalogImport:body.variables.selections.map((row:{modelID:string}) => ({modelID:row.modelID,status:'catalogChanged'}))}}});
+      const outcomes = body.variables.selections.map(({ modelID }: { modelID: string }) => ({ modelID, status: 'catalogChanged' }));
+      return route.fulfill({ json: { data: { applyCatalogImport: outcomes } } });
     }
     if (body.operationName !== 'CatalogImportPreview') return route.fallback();
     reads++;
-    const rows = Array.from({length:28}, (_, i) => {
-      const modelID = i < 27 ? 'batch-'+i : 'outside';
-      const offer = {provider,modelID,name:modelID,developer:provider,canonical:'',type:'chat',rates:[
-        {field:'input',base:revision === 'first'?1:2,tiers:[]},
-        {field:'cacheWrite',base:null,tiers:[{label:'context 256000',value:2.5}]},
-      ]};
-      return {modelID,name:modelID,developer:provider,aliases:[modelID],version:'',quoteVersion:revision,changed:false,archived:false,offers:[offer],preferred:offer,prices:[]};
+    const rows = Array.from({ length: 28 }, (_, i) => {
+      const modelID = i < 27 ? 'batch-' + i : 'outside';
+      const offer = {
+        provider, modelID, name: modelID, developer: provider, canonical: '', type: 'chat',
+        rates: [
+          { field: 'input', base: revision === 'first' ? 1 : 2, tiers: [] },
+          { field: 'cacheWrite', base: null, tiers: [{ label: 'context 256000', value: 2.5 }] },
+        ],
+      };
+      return {
+        modelID, name: modelID, developer: provider, aliases: [modelID], version: '', quoteVersion: revision,
+        mergeTarget: '', mergeTargetOccupied: false, changed: false, archived: false, offers: [offer], preferred: offer, prices: [],
+      };
     });
-    return route.fulfill({json:{data:{catalogImportPreview:{providers:[provider],source:'upstream',upstreamURL:'https://example.test/catalog',revision:'same-source',rows}}}});
+    const preview = { providers: [provider], source: 'upstream', upstreamURL: 'https://example.test/catalog', revision: 'same-source', rows };
+    return route.fulfill({ json: { data: { catalogImportPreview: preview } } });
   });
-  await gotoAndEnsureAuth(page,'/models');
+  await gotoAndEnsureAuth(page, '/models');
   await page.getByTestId('catalog-import-open').click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox').fill('batch-');
   await expect(dialog.getByText(/Models: 27|共 27 个模型/)).toBeVisible();
-  await dialog.getByRole('button',{name:/Select all applicable|全选筛选/}).click();
+  await dialog.getByTestId('catalog-import-select-all').click();
   await expect(dialog.getByTestId('catalog-import-apply')).toContainText('27');
-  await dialog.getByRole('button',{name:/^batch-0 /}).click();
-  const cache = dialog.getByRole('combobox',{name:/Cache Write|缓存写入/});
-  const tier = await cache.locator('option').filter({hasText:'2.5'}).getAttribute('value');
+  await dialog.getByTestId('catalog-import-expand-batch-0').click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const priceRow = dialog.getByTestId('catalog-price-row-cacheWrite');
+  await priceRow.scrollIntoViewIfNeeded();
+  const cache = priceRow.getByTestId('catalog-price-action-cacheWrite');
+  const labelBox = await priceRow.getByRole('rowheader').boundingBox();
+  const controlBox = await cache.boundingBox();
+  const listBox = await dialog.getByTestId('catalog-import-rows').boundingBox();
+  expect(labelBox!.x).toBeGreaterThanOrEqual(listBox!.x);
+  expect(controlBox!.x + controlBox!.width).toBeLessThanOrEqual(listBox!.x + listBox!.width);
+  const tier = await cache.locator('option').filter({ hasText: '2.5' }).getAttribute('value');
   expect(tier).toBeTruthy();
   await cache.selectOption(tier!);
 
@@ -52,13 +69,13 @@ test('a filtered batch keeps the quotes originally reviewed across a background 
   await page.clock.fastForward(61_000);
   revision = 'second';
   const previousReads = reads;
-  await page.evaluate(()=>window.dispatchEvent(new Event('offline')));
-  await page.evaluate(()=>window.dispatchEvent(new Event('online')));
-  await expect.poll(()=>reads).toBeGreaterThan(previousReads);
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => reads).toBeGreaterThan(previousReads);
   await dialog.getByTestId('catalog-import-apply').click();
-  await expect.poll(()=>applied.length).toBe(27);
-  expect(applied.every(row=>row.quoteVersions[0]==='first')).toBe(true);
-  expect(applied.flatMap(row=>row.prices).filter(price=>price.action==='TIER')).toEqual([
-    expect.objectContaining({field:'cacheWrite',tier:'context 256000'}),
+  await expect.poll(() => applied.length).toBe(27);
+  expect(applied.every((row) => row.quoteVersions[0] === 'first')).toBe(true);
+  expect(applied.flatMap((row) => row.prices).filter(price=>price.action === 'TIER')).toEqual([
+    expect.objectContaining({ field: 'cacheWrite', tier: 'context 256000' }),
   ]);
 });

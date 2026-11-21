@@ -374,6 +374,13 @@ func filterConditionValueToInt64(condition objects.Condition) (int64, bool, erro
 
 // CreateModel creates a new model with the provided input.
 func (svc *ModelService) CreateModel(ctx context.Context, input ent.CreateModelInput) (*ent.Model, error) {
+	return svc.CreateModelWithPriceEdits(ctx, input, nil)
+}
+
+func (svc *ModelService) CreateModelWithPriceEdits(ctx context.Context, input ent.CreateModelInput, edits []ManualPriceEdit) (*ent.Model, error) {
+	if err := applyManualPriceEdits(input.ModelCard, edits); err != nil {
+		return nil, err
+	}
 	// Validate regex patterns in settings if provided
 	if input.Settings != nil {
 		if err := svc.validateModelSettings(input.Settings); err != nil {
@@ -500,6 +507,9 @@ func (svc *ModelService) UpdateModelWithPriceEdits(ctx context.Context, id int, 
 	if expected != nil {
 		mut.Where(model.UpdatedAtEQ(*expected))
 	}
+	if len(edited) > 0 && input.ModelCard == nil {
+		return nil, xerrors.ValidationError("price edits require a model card")
+	}
 	if input.ModelCard != nil {
 		if err := model.Policy.EvalMutation(ctx, mut.Mutation()); err != nil {
 			return nil, err
@@ -510,7 +520,10 @@ func (svc *ModelService) UpdateModelWithPriceEdits(ctx context.Context, id int, 
 		if err != nil {
 			return nil, err
 		}
-		preserveCatalogPrices(original.ModelCard, input.ModelCard, edited)
+		preserveCatalogPrices(original.ModelCard, input.ModelCard)
+		if err := applyManualPriceEdits(input.ModelCard, edited); err != nil {
+			return nil, err
+		}
 		mut.Where(model.UpdatedAtEQ(original.UpdatedAt))
 		mut.SetModelCard(input.ModelCard)
 	}

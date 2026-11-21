@@ -38,10 +38,11 @@ const testCatalog = `{"providers":{
 }}`
 
 type importFixture struct {
-	ctx  context.Context
-	svc  *ModelService
-	db   *ent.Client
-	body atomic.Value
+	ctx      context.Context
+	svc      *ModelService
+	db       *ent.Client
+	body     atomic.Value
+	requests atomic.Int64
 }
 
 func catalogFixture(t *testing.T) *importFixture {
@@ -50,7 +51,10 @@ func catalogFixture(t *testing.T) *importFixture {
 	f := &importFixture{ctx: ctx, db: ent.FromContext(ctx)}
 	f.svc = NewModelService(ModelServiceParams{Ent: f.db, Catalog: catalog, SystemService: sys})
 	f.body.Store(testCatalog)
-	useCatalogUpstream(t, ctx, sys, catalog, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, f.body.Load().(string)) })
+	useCatalogUpstream(t, ctx, sys, catalog, func(w http.ResponseWriter, _ *http.Request) {
+		f.requests.Add(1)
+		_, _ = io.WriteString(w, f.body.Load().(string))
+	})
 	return f
 }
 
@@ -258,4 +262,86 @@ func TestCatalogImportProtectsLegacyPricesAndWriteOnlyEditor(t *testing.T) {
 	m, err := f.svc.UpdateModel(ctx, m.ID, &ent.UpdateModelInput{ModelCard: &card, Name: lo.ToPtr("Renamed")})
 	require.NoError(t, err)
 	require.True(t, m.ModelCard.CatalogPrices["output"].Follow)
+}
+
+func TestCatalogImportNestedChannelIDs(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "a/vendor/x", "b/vendor/x", "a/vendor/only")
+	scope := CatalogImportScope{Channels: true, IgnorePrefix: true}
+	preview := f.preview(t, scope)
+	require.Len(t, preview.Rows, 3)
+	a, b := selection(t, preview, "a/vendor/x"), selection(t, preview, "b/vendor/x")
+	a.ModelID, a.Developer = "x", "dev"
+	a.Aliases = append(a.Aliases, b.Aliases...)
+	a.QuoteVersions = append(a.QuoteVersions, b.QuoteVersions...)
+	slices.Sort(a.QuoteVersions)
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, a))
+	stored := f.db.Model.Query().Where(model.ModelIDEQ("x")).OnlyX(f.ctx)
+	require.ElementsMatch(t, []string{"a/vendor/x", "b/vendor/x"}, stored.ModelCard.CatalogAliases)
+	require.Len(t, stored.Settings.Associations, 2)
+	for i, id := range a.Aliases {
+		require.Equal(t, id, stored.Settings.Associations[i].ModelID.ModelID)
+	}
+	selection(t, preview, "a/vendor/only")
+}
+
+func TestCatalogImportRecognizesStoredAliasesAcrossScopes(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "a/shared", "b/shared")
+	scope := CatalogImportScope{Channels: true, IgnorePrefix: true}
+	preview := f.preview(t, scope)
+	group := selection(t, preview, "shared")
+	group.Developer = "dev"
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, group))
+	for _, scope := range []CatalogImportScope{{Providers: []string{"relay"}}, {Channels: true, Tracked: true}} {
+		for _, row := range f.preview(t, scope).Rows {
+			require.NotContains(t, []string{"a/shared", "b/shared"}, row.ModelID)
+		}
+	}
+}
+
+func TestCatalogImportPreservesUnrelatedExistingMergeTarget(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "a/shared", "b/shared")
+	f.db.Model.Create().SetModelID("shared").SetName("Different model").SetGroup("other").SetDeveloper("other").SetIcon("other").SetSettings(&objects.ModelSettings{}).SetModelCard(&objects.ModelCard{}).SaveX(f.ctx)
+	p := f.preview(t, CatalogImportScope{Channels: true, Tracked: true, IgnorePrefix: true})
+	require.Len(t, p.Rows, 2)
+	for _, row := range p.Rows {
+		require.True(t, row.MergeTargetOccupied)
+		require.Equal(t, "shared", row.MergeTarget)
+	}
+	for _, id := range []string{"a/shared", "b/shared"} {
+		require.Empty(t, selection(t, p, id).Version)
+	}
+}
+
+func TestCatalogCheckFetchesAfterPreview(t *testing.T) {
+	f := catalogFixture(t)
+	f.preview(t, CatalogImportScope{Channels: true})
+	reads := f.requests.Load()
+	f.body.Store("offline")
+	state, err := f.svc.CheckModelCatalog(f.ctx)
+	require.NoError(t, err)
+	require.True(t, state.Failed)
+	require.Equal(t, reads+1, f.requests.Load())
+	require.Nil(t, state.LastSuccess)
+	f.body.Store(testCatalog)
+	state, err = f.svc.CheckModelCatalog(f.ctx)
+	require.NoError(t, err)
+	require.False(t, state.Failed)
+	require.Equal(t, reads+2, f.requests.Load())
+	require.NotNil(t, state.LastSuccess)
+}
+
+func TestCatalogAutomaticallyMergesVerifiedNestedIDs(t *testing.T) {
+	f := catalogFixture(t)
+	f.changeCatalog(strings.NewReplacer("a/shared", "a/vendor/shared", "b/shared", "b/vendor/shared").Replace(testCatalog))
+	f.channel(t, channel.StatusEnabled, "a/vendor/shared", "b/vendor/shared")
+	scope := CatalogImportScope{Channels: true, IgnorePrefix: true}
+	preview := f.preview(t, scope)
+	require.Len(t, preview.Rows, 1)
+	group := selection(t, preview, "shared")
+	require.Equal(t, []string{"a/vendor/shared", "b/vendor/shared"}, group.Aliases)
+	group.Developer = "dev"
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, group))
 }

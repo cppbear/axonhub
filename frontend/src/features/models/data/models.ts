@@ -3,7 +3,7 @@ import { graphqlRequest } from '@/gql/graphql';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useErrorHandler } from '@/hooks/use-error-handler';
-import { Model, ModelConnection, CreateModelInput, UpdateModelInput, modelConnectionSchema, modelSchema } from './schema';
+import { Model, ModelConnection, CreateModelInput, UpdateModelInput, modelConnectionSchema, modelSchema, referencePriceFields, type ReferencePriceField } from './schema';
 
 const MODELS_QUERY = `
   query GetModels(
@@ -139,8 +139,8 @@ const MODELS_QUERY = `
 `;
 
 const CREATE_MODEL_MUTATION = `
-  mutation CreateModel($input: CreateModelInput!) {
-    createModel(input: $input) {
+  mutation CreateModel($input: CreateModelInput!, $editedPrices: [ManualPriceEdit!]) {
+    createModel(input: $input, editedPrices: $editedPrices) {
       id
       createdAt
       updatedAt
@@ -536,7 +536,8 @@ export function useCreateModel() {
 
   return useMutation({
     mutationFn: async (input: CreateModelInput) => {
-      const data = await graphqlRequest<{ createModel: Model }>(CREATE_MODEL_MUTATION, { input });
+      const editedPrices = referencePriceFields.filter((field) => input.modelCard.cost?.[field] == null).map((field) => ({ field, missing: true }));
+      const data = await graphqlRequest<{ createModel: Model }>(CREATE_MODEL_MUTATION, { input, editedPrices });
       return modelSchema.parse(data.createModel);
     },
     onSuccess: () => {
@@ -575,7 +576,7 @@ export function useUpdateModel() {
   const { handleError } = useErrorHandler();
 
   return useMutation({
-    mutationFn: async (variables: { id: string; input: UpdateModelInput; editedPrices?: { field: string; missing: boolean }[]; expectedUpdatedAt?: string }) => {
+    mutationFn: async (variables: { id: string; input: UpdateModelInput; editedPrices?: { field: ReferencePriceField; missing: boolean }[]; expectedUpdatedAt?: string }) => {
       const data = await graphqlRequest<{ updateModel: Model }>(UPDATE_MODEL_MUTATION, variables);
       return modelSchema.parse(data.updateModel);
     },

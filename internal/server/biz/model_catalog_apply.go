@@ -22,6 +22,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/model"
 	"github.com/looplj/axonhub/internal/objects"
+	"github.com/looplj/axonhub/internal/pkg/xerrors"
 )
 
 var errCatalogConflict = errors.New("model changed since preview")
@@ -51,7 +52,7 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 		case preview.Revision != revision:
 			status = CatalogChanged
 		default:
-			err := svc.applyCatalogRow(ctx, scope, preview.Source, rows, selection)
+			err := svc.applyCatalogRow(ctx, preview.Source, rows, selection)
 			switch {
 			case errors.Is(err, errCatalogQuoteChanged):
 				status = CatalogChanged
@@ -73,11 +74,11 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 	return result, nil
 }
 
-func (svc *ModelService) applyCatalogRow(ctx context.Context, scope CatalogImportScope, source string, rows map[string]*CatalogImportRow, sel CatalogImportSelection) error {
+func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, rows map[string]*CatalogImportRow, sel CatalogImportSelection) error {
 	if len(sel.Aliases) == 0 || strings.TrimSpace(sel.ModelID) == "" {
 		return errCatalogSelection
 	}
-	validID := false
+	merged := false
 	versions := map[string]bool{}
 	seenAliases := map[string]bool{}
 	submitted := map[string]bool{}
@@ -95,11 +96,14 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, scope CatalogImpor
 			seenAliases[alias] = true
 		}
 		versions[row.QuoteVersion] = true
-		if row.ModelID == sel.ModelID {
-			validID = true
-		}
-		if row.ModelID != sel.ModelID && (!scope.IgnorePrefix || catalogSuffix(id) != catalogSuffix(sel.ModelID) || row.Version != "") {
-			return errCatalogSelection
+		if row.ModelID != sel.ModelID {
+			if row.MergeTargetOccupied && row.MergeTarget == sel.ModelID {
+				return errCatalogConflict
+			}
+			if row.MergeTarget != sel.ModelID || row.Version != "" || len(sel.Aliases) < 2 {
+				return errCatalogSelection
+			}
+			merged = true
 		}
 		if row.Archived {
 			return errCatalogConflict
@@ -114,7 +118,8 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, scope CatalogImpor
 	if len(seenAliases) != len(sel.Aliases) {
 		return errCatalogSelection
 	}
-	if !validID && !(scope.IgnorePrefix && catalogSuffix(sel.Aliases[0]) == sel.ModelID) {
+	// A bare candidate with the target ID must be part of a manual merge.
+	if merged && rows[sel.ModelID] != nil && !submitted[sel.ModelID] {
 		return errCatalogSelection
 	}
 	db := svc.entFromContext(ctx)
@@ -277,37 +282,48 @@ func MissingReferencePrices(card *objects.ModelCard) []string {
 	return fields
 }
 
-// Old clients submit the whole card. Carry forward its tracking metadata and
-// detach only rates that were edited (including explicitly setting zero).
+type ReferencePriceField string
+
 type ManualPriceEdit struct {
-	Field   string
+	Field   ReferencePriceField
 	Missing bool
 }
 
-func preserveCatalogPrices(old, next *objects.ModelCard, edited []ManualPriceEdit) {
+// Old clients submit the whole card. Preserve the source of each unchanged price.
+func preserveCatalogPrices(old, next *objects.ModelCard) {
 	if old == nil {
 		return
 	}
 	next.CatalogPrices = maps.Clone(old.CatalogPrices)
 	next.CatalogAliases = slices.Clone(old.CatalogAliases)
-	for field, b := range next.CatalogPrices {
+	for field, binding := range next.CatalogPrices {
 		oldValue := old.Cost.Field(field)
-		if oldValue != nil && (*oldValue != *next.Cost.Field(field)) {
-			b.Follow, b.Missing = false, false
-			next.CatalogPrices[field] = b
+		if oldValue != nil && *oldValue != *next.Cost.Field(field) {
+			binding.Follow, binding.Missing = false, false
+			next.CatalogPrices[field] = binding
 		}
 	}
-	for _, edit := range edited {
-		value := next.Cost.Field(edit.Field)
-		if value == nil {
-			continue
+}
+
+func applyManualPriceEdits(card *objects.ModelCard, edits []ManualPriceEdit) error {
+	seen := map[ReferencePriceField]bool{}
+	for _, edit := range edits {
+		if card == nil {
+			return xerrors.ValidationError("price edits require a model card")
 		}
-		if next.CatalogPrices == nil {
-			next.CatalogPrices = map[string]objects.CatalogPrice{}
+		field := string(edit.Field)
+		value := card.Cost.Field(field)
+		if value == nil || seen[edit.Field] {
+			return xerrors.ValidationError(fmt.Sprintf("invalid or repeated reference price field %q", field))
+		}
+		seen[edit.Field] = true
+		if card.CatalogPrices == nil {
+			card.CatalogPrices = map[string]objects.CatalogPrice{}
 		}
 		if edit.Missing {
 			*value = 0
 		}
-		next.CatalogPrices[edit.Field] = objects.CatalogPrice{Missing: edit.Missing}
+		card.CatalogPrices[field] = objects.CatalogPrice{Missing: edit.Missing}
 	}
+	return nil
 }

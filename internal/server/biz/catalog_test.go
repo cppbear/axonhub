@@ -245,3 +245,10 @@ func TestCatalogService_MirrorChangeDiscardsInflightCacheFill(t *testing.T) {
 	require.Equal(t, mirror.URL, held.upstreamURL)
 	require.JSONEq(t, `{"providers":{"new":{}}}`, string(held.Data))
 }
+
+func (s *CatalogService) held(filtered bool) *catalogPayload {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.slot(filtered).payload
+}

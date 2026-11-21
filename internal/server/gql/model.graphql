@@ -236,7 +236,7 @@ extend type Query {
 }
 
 extend type Mutation {
-  createModel(input: CreateModelInput!): Model!
+  createModel(input: CreateModelInput!, editedPrices: [ManualPriceEdit!]): Model!
   bulkCreateModels(inputs: [CreateModelInput!]!): [Model!]!
   updateModel(id: ID!, input: UpdateModelInput!, editedPrices: [ManualPriceEdit!], expectedUpdatedAt: Time): Model!
   deleteModel(id: ID!): Boolean!
@@ -247,8 +247,10 @@ extend type Mutation {
   bulkDeleteModels(ids: [ID!]!): Boolean!
 }
 
+enum ReferencePriceField { input output cacheRead cacheWrite }
+
 input ManualPriceEdit {
-  field: String!
+  field: ReferencePriceField!
   missing: Boolean!
 }
 
@@ -295,6 +297,8 @@ type CatalogImportRow {
   aliases: [String!]!
   version: String!
   quoteVersion: String!
+  mergeTarget: String!
+  mergeTargetOccupied: Boolean!
   archived: Boolean!
   changed: Boolean!
   offers: [CatalogImportOffer!]!

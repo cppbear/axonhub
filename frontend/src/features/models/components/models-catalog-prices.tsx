@@ -2,21 +2,15 @@
 // 关联文件:
 //   frontend/src/features/models/components/models-catalog-import.tsx
 //   frontend/src/features/models/data/catalog-import.ts
+//   frontend/src/features/models/data/schema.ts
 //   frontend/src/locales/en.json
 //   frontend/src/locales/zh.json
 // 注意事项:
 //   未绑定来源的历史价格默认保留，选择某档报价会保存为固定单价。
 import { useTranslation } from 'react-i18next';
 import { Input } from '@/components/ui/input';
-import {
-  priceFields,
-  type ImportRow,
-  type Offer,
-  type PriceSelection,
-  type ImportSelection,
-  type PriceField,
-} from '../data/catalog-import';
-import { modelTypeSchema } from '../data/schema';
+import type { ImportRow, Offer, PriceSelection, ImportSelection } from '../data/catalog-import';
+import { modelTypeSchema, referencePriceFields, type ReferencePriceField } from '../data/schema';
 
 export const selectStyle = 'h-9 max-w-full rounded-md border bg-background px-2 text-sm';
 export const offerKey = (offer: { provider: string; modelID: string }) => JSON.stringify([offer.provider, offer.modelID]);
@@ -28,7 +22,7 @@ export function useReferencePriceFormat() {
 
 export function defaultSelection(row: ImportRow, offer = row.preferred, replaceSource = false): ImportSelection {
   const prices: PriceSelection[] = [];
-  for (const field of priceFields) {
+  for (const field of referencePriceFields) {
     const local = row.prices.find((p) => p.field === field);
     if (row.version && !local?.follow) continue;
     const source = local && !replaceSource ? row.offers.find((o) => o.provider === local.provider && o.modelID === local.modelID) : offer;
@@ -63,7 +57,7 @@ export function PriceEditor({
   const { t } = useTranslation();
   const offer = row.offers.find((o) => o.provider === draft.provider && o.modelID === draft.sourceModelID);
   const formatPrice = useReferencePriceFormat();
-  const updateField = (field: PriceField, value: string) => {
+  const updateField = (field: ReferencePriceField, value: string) => {
     const prices = draft.prices.filter((p) => p.field !== field);
     if (value) prices.push({ field, ...JSON.parse(value) });
     onChange({ ...draft, prices });
@@ -124,9 +118,9 @@ export function PriceEditor({
         </select>
       </label>
       <p className='text-muted-foreground text-xs'>{t('models.import.unit')}</p>
-      <div className='overflow-x-auto'>
-        <table className='w-full text-left text-sm'>
-          <thead>
+      <div className='min-w-0'>
+        <table className='block w-full text-left text-sm sm:table'>
+          <thead className='hidden sm:table-header-group'>
             <tr className='text-muted-foreground'>
               <th>{t('models.modelCard.cost')}</th>
               <th>{t('models.import.currentPrice')}</th>
@@ -134,17 +128,18 @@ export function PriceEditor({
               <th>{t('models.import.onApply')}</th>
             </tr>
           </thead>
-          <tbody>
-            {priceFields.map((field) => {
+          <tbody className='block sm:table-row-group'>
+            {referencePriceFields.map((field) => {
               const local = row.prices.find((r) => r.field === field);
               const action = draft.prices.find((r) => r.field === field);
               const actionValue = action ? optionValue(action.action, action.action === 'FIX' ? undefined : action, action.tier) : '';
               const source = row.offers.find((o) => o.provider === action?.provider && o.modelID === action?.modelID) ?? offer;
               const rate = source?.rates.find((r) => r.field === field);
               return (
-                <tr key={field} className='border-t'>
-                  <td className='py-2 pr-2'>{t('models.modelCard.' + field)}</td>
-                  <td className='pr-2 tabular-nums'>
+                <tr key={field} data-testid={'catalog-price-row-' + field} className='grid grid-cols-2 gap-x-3 gap-y-2 border-t py-3 sm:table-row'>
+                  <th scope='row' className='col-span-2 font-medium sm:py-2 sm:pr-2'>{t('models.modelCard.' + field)}</th>
+                  <td className='min-w-0 break-words tabular-nums sm:pr-2'>
+                    <span className='text-muted-foreground block text-xs sm:hidden'>{t('models.import.currentPrice')}</span>
                     {local?.value == null ? '—' : formatPrice(local.value)}
                     {local && (
                       <div className='text-muted-foreground text-xs'>
@@ -154,7 +149,8 @@ export function PriceEditor({
                       </div>
                     )}
                   </td>
-                  <td className='pr-2 tabular-nums'>
+                  <td className='min-w-0 break-words tabular-nums sm:pr-2'>
+                    <span className='text-muted-foreground block text-xs sm:hidden'>{t('models.import.referencePrice')}</span>
                     {rate?.base == null ? '—' : formatPrice(rate.base)}
                     {rate?.tiers.length ? (
                       <details>
@@ -167,9 +163,11 @@ export function PriceEditor({
                       </details>
                     ) : null}
                   </td>
-                  <td>
+                  <td className='col-span-2 min-w-0'>
+                    <span className='text-muted-foreground block text-xs sm:hidden'>{t('models.import.onApply')}</span>
                     <select
-                      className={selectStyle}
+                      data-testid={'catalog-price-action-' + field}
+                      className={selectStyle + ' w-full sm:w-auto'}
                       aria-label={t('models.modelCard.' + field)}
                       value={actionValue}
                       onChange={(e) => updateField(field, e.target.value)}

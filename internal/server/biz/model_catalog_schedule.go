@@ -23,6 +23,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/system"
 	"github.com/looplj/axonhub/internal/log"
+	"github.com/looplj/axonhub/internal/pkg/xerrors"
 	"github.com/looplj/axonhub/internal/server/scheduler"
 )
 
@@ -50,14 +51,14 @@ type CatalogCheckStatus struct {
 func (s CatalogCheckSettings) next(now time.Time) (time.Time, error) {
 	at, err := time.Parse("15:04", s.Time)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid catalog check time: %w", err)
+		return time.Time{}, xerrors.ValidationError("catalog check time must be in HH:MM format")
 	}
 	if s.Timezone == "" || s.Timezone == "Local" {
-		return time.Time{}, fmt.Errorf("a site timezone is required")
+		return time.Time{}, xerrors.ValidationError("a site timezone is required")
 	}
 	zone, err := time.LoadLocation(s.Timezone)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid catalog check timezone: %w", err)
+		return time.Time{}, xerrors.ValidationError("unknown catalog check timezone")
 	}
 	rule, err := cronexpr.Parse(fmt.Sprintf("%d %d * * *", at.Minute(), at.Hour()))
 	if err != nil {
@@ -181,8 +182,12 @@ func (svc *ModelService) checkModelCatalog(ctx context.Context, now time.Time, s
 		if !claimed {
 			return svc.CatalogCheckStatus(ctx)
 		}
-		preview, err := svc.CatalogImportPreview(ctx, CatalogImportScope{Channels: true, Tracked: true, Providers: cfg.Providers, IgnorePrefix: cfg.IgnorePrefix})
-		state.Failed = err != nil || preview.Source != catalogSourceUpstream
+		snapshot, err := svc.catalog.snapshot(ctx, false, true)
+		var preview *CatalogImportPreview
+		if err == nil && snapshot.Source == catalogSourceUpstream {
+			preview, err = svc.catalogPreviewFromSnapshot(ctx, CatalogImportScope{Channels: true, Tracked: true, Providers: cfg.Providers, IgnorePrefix: cfg.IgnorePrefix}, snapshot)
+		}
+		state.Failed = err != nil || preview == nil
 		if !state.Failed {
 			success := time.Now().UTC()
 			state.LastSuccess = &success

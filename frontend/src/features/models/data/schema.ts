@@ -26,6 +26,8 @@ export const modelCostSchema = z.object({
   cacheWrite: z.number().optional(),
 });
 export type ModelCost = z.infer<typeof modelCostSchema>;
+export const referencePriceFields = modelCostSchema.keyof().options;
+export type ReferencePriceField = keyof ModelCost;
 
 export const modelLimitSchema = z.object({
   context: z.number(),

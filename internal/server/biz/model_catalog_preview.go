@@ -66,7 +66,8 @@ type CatalogImportLocalPrice struct {
 
 type CatalogImportRow struct {
 	ModelID, Name, Developer, Version string
-	QuoteVersion                      string
+	QuoteVersion, MergeTarget         string
+	MergeTargetOccupied               bool
 	Aliases                           []string
 	Archived, Changed                 bool
 	Offers                            []*CatalogImportOffer
@@ -120,14 +121,14 @@ type CatalogImportOutcome struct {
 type catalogOfferKey struct{ provider, id string }
 
 type catalogIndex struct {
-	offers        map[catalogOfferKey]*CatalogImportOffer
-	exact, suffix map[string][]*CatalogImportOffer
-	providers     []string
+	offers               map[catalogOfferKey]*CatalogImportOffer
+	exact, byLastSegment map[string][]*CatalogImportOffer
+	providers            []string
 }
 
-func catalogSuffix(id string) string {
-	if _, suffix, ok := strings.Cut(id, "/"); ok && suffix != "" {
-		return suffix
+func catalogLastIDSegment(id string) string {
+	if slash := strings.LastIndexByte(id, '/'); slash >= 0 && slash+1 < len(id) {
+		return id[slash+1:]
 	}
 	return id
 }
@@ -190,7 +191,7 @@ func indexCatalog(data []byte) (*catalogIndex, error) {
 	if err := json.Unmarshal(data, &catalog); err != nil {
 		return nil, fmt.Errorf("decode model catalog: %w", err)
 	}
-	idx := &catalogIndex{offers: map[catalogOfferKey]*CatalogImportOffer{}, exact: map[string][]*CatalogImportOffer{}, suffix: map[string][]*CatalogImportOffer{}, providers: sortedStringKeys(catalog.Providers)}
+	idx := &catalogIndex{offers: map[catalogOfferKey]*CatalogImportOffer{}, exact: map[string][]*CatalogImportOffer{}, byLastSegment: map[string][]*CatalogImportOffer{}, providers: sortedStringKeys(catalog.Providers)}
 	for _, provider := range idx.providers {
 		for _, entry := range catalog.Providers[provider].Models {
 			id := modelString(entry, "id")
@@ -227,8 +228,8 @@ func indexCatalog(data []byte) (*catalogIndex, error) {
 			offer := &CatalogImportOffer{Provider: provider, ModelID: id, Name: name, Developer: developer, Canonical: canonical, Rates: offerRates(entry), Type: catalogModelType(modelString(entry, "type")), entry: entry}
 			idx.offers[key] = offer
 			idx.exact[id] = append(idx.exact[id], offer)
-			suffix := catalogSuffix(id)
-			idx.suffix[suffix] = append(idx.suffix[suffix], offer)
+			suffix := catalogLastIDSegment(id)
+			idx.byLastSegment[suffix] = append(idx.byLastSegment[suffix], offer)
 		}
 	}
 	return idx, nil
@@ -320,6 +321,10 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 	if err != nil {
 		return nil, err
 	}
+	return svc.catalogPreviewFromSnapshot(ctx, scope, snapshot)
+}
+
+func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope CatalogImportScope, snapshot CatalogSnapshot) (*CatalogImportPreview, error) {
 	idx, err := indexCatalog(snapshot.Data)
 	if err != nil {
 		return nil, err
@@ -342,7 +347,7 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 	offers := map[string][]*CatalogImportOffer{}
 	for _, m := range local {
 		existing[m.ModelID] = m
-		if scope.IgnorePrefix && m.ModelCard != nil {
+		if m.ModelCard != nil {
 			for _, alias := range m.ModelCard.CatalogAliases {
 				importedIDs[alias] = m.ModelID
 			}
@@ -356,6 +361,11 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 			}
 		}
 	}
+	// An exact local ID takes precedence over an alias recorded on another card.
+	for id := range existing {
+		importedIDs[id] = id
+	}
+	mergeTargets := map[string]string{}
 	if scope.Channels {
 		channels, err := db.Channel.Query().Where(channel.StatusIn(channel.StatusEnabled, channel.StatusDisabled)).Select(channel.FieldSupportedModels).All(ctx)
 		if err != nil {
@@ -371,31 +381,32 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 			}
 		}
 		for _, id := range sortedStringKeys(ids) {
-			if publicID, ok := importedIDs[id]; ok && existing[id] == nil {
-				aliases[publicID] = slices.Clone(existing[publicID].ModelCard.CatalogAliases)
+			if publicID, ok := importedIDs[id]; ok {
+				aliases[publicID] = append(aliases[publicID], id)
 				continue
 			}
 			group := id
 			if scope.IgnorePrefix {
-				group = catalogSuffix(id)
+				group = catalogLastIDSegment(id)
 			}
 			groups[group] = append(groups[group], id)
 		}
-		for suffix, group := range groups {
-			// Keep existing public IDs independent when they already have local configuration.
-			canMerge := len(group) > 1 && shareCatalogIdentity(group, idx)
-			for _, id := range group {
-				if id != suffix && existing[id] != nil {
-					canMerge = false
-				}
+		for target, group := range groups {
+			// A provider may also supply the bare ID in the combined watch scope.
+			if scope.IgnorePrefix && importedIDs[target] == "" && !slices.Contains(group, target) &&
+				slices.ContainsFunc(idx.exact[target], func(o *CatalogImportOffer) bool { return slices.Contains(scope.Providers, o.Provider) }) {
+				group = append(group, target)
+				slices.Sort(group)
 			}
-			if canMerge {
-				aliases[suffix] = group
-			} else {
-				for _, id := range group {
-					if _, ok := aliases[id]; !ok {
-						aliases[id] = []string{id}
-					}
+			occupied := importedIDs[target] != ""
+			if len(group) > 1 && !occupied && shareCatalogIdentity(group, idx) {
+				aliases[target] = group
+				continue
+			}
+			for _, id := range group {
+				aliases[id] = []string{id}
+				if scope.IgnorePrefix && (len(group) > 1 || occupied) {
+					mergeTargets[id] = target
 				}
 			}
 		}
@@ -414,23 +425,27 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 		id := key.id
 		if grouped, ok := channelGroups[id]; ok {
 			id = grouped
-		} else if parent := importedIDs[id]; parent != "" && existing[id] == nil {
+		} else if parent := importedIDs[id]; parent != "" {
 			id = parent
 		}
-		if _, ok := aliases[id]; !ok {
-			aliases[id] = []string{key.id}
-		}
+		aliases[id] = append(aliases[id], key.id)
 		offers[id] = append(offers[id], offer)
 	}
 	for _, id := range sortedStringKeys(aliases) {
-		row := &CatalogImportRow{ModelID: id, Name: id, Aliases: aliases[id], Offers: []*CatalogImportOffer{}, Prices: []CatalogImportLocalPrice{}}
+		slices.Sort(aliases[id])
+		target := mergeTargets[id]
+		row := &CatalogImportRow{
+			ModelID: id, Name: id, Aliases: slices.Compact(aliases[id]),
+			MergeTarget: target, MergeTargetOccupied: target != "" && importedIDs[target] != "",
+			Offers: []*CatalogImportOffer{}, Prices: []CatalogImportLocalPrice{},
+		}
 		candidates := offers[id]
 		if len(candidates) == 0 {
 			for _, alias := range row.Aliases {
 				candidates = append(candidates, idx.exact[alias]...)
 			}
 			if scope.IgnorePrefix && len(candidates) == 0 {
-				candidates = idx.suffix[catalogSuffix(id)]
+				candidates = idx.byLastSegment[catalogLastIDSegment(id)]
 			}
 		}
 		row.Preferred = preferredOffer(candidates)

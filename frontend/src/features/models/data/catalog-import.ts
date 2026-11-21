@@ -2,12 +2,11 @@
 // 关联文件:
 //   frontend/src/features/models/components/models-catalog-import.tsx
 //   internal/server/gql/model.graphql
-//   frontend/src/features/models/data/models.ts
+//   frontend/src/features/models/data/schema.ts
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { graphqlRequest } from '@/gql/graphql';
+import type { ReferencePriceField } from './schema';
 
-export const priceFields = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
-export type PriceField = (typeof priceFields)[number];
 export interface ImportScope {
   channels: boolean;
   providers: string[];
@@ -15,7 +14,7 @@ export interface ImportScope {
   tracked: boolean;
 }
 export interface ImportRate {
-  field: PriceField;
+  field: ReferencePriceField;
   base: number | null;
   tiers: { label: string; value: number }[];
 }
@@ -29,7 +28,7 @@ export interface Offer {
   rates: ImportRate[];
 }
 export interface LocalRate {
-  field: PriceField;
+  field: ReferencePriceField;
   value: number | null;
   follow: boolean;
   provider: string;
@@ -37,6 +36,8 @@ export interface LocalRate {
 }
 export interface ImportRow {
   mergedVersions?: string[];
+  mergeTarget: string;
+  mergeTargetOccupied: boolean;
   modelID: string;
   name: string;
   developer: string;
@@ -57,7 +58,7 @@ export interface CatalogPreview {
   rows: ImportRow[];
 }
 export interface PriceSelection {
-  field: PriceField;
+  field: ReferencePriceField;
   action: 'FOLLOW' | 'FIX' | 'FIX_BASE' | 'TIER';
   provider: string;
   modelID: string;
@@ -101,7 +102,7 @@ const statusFields = 'settings { enabled time timezone providers ignorePrefix } 
 const previewQuery = `query CatalogImportPreview($scope: CatalogImportScope!) {
   catalogImportPreview(scope: $scope) {
     source upstreamURL revision providers rows { modelID name developer aliases version quoteVersion archived changed
-      offers { ${offerFields} } preferred { ${offerFields} } prices { field value follow provider modelID }
+      offers { ${offerFields} } preferred { ${offerFields} } mergeTarget mergeTargetOccupied prices { field value follow provider modelID }
     }
   }
 }`;

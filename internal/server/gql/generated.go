@@ -402,17 +402,19 @@ type ComplexityRoot struct {
 	}
 
 	CatalogImportRow struct {
-		Aliases      func(childComplexity int) int
-		Archived     func(childComplexity int) int
-		Changed      func(childComplexity int) int
-		Developer    func(childComplexity int) int
-		ModelID      func(childComplexity int) int
-		Name         func(childComplexity int) int
-		Offers       func(childComplexity int) int
-		Preferred    func(childComplexity int) int
-		Prices       func(childComplexity int) int
-		QuoteVersion func(childComplexity int) int
-		Version      func(childComplexity int) int
+		Aliases             func(childComplexity int) int
+		Archived            func(childComplexity int) int
+		Changed             func(childComplexity int) int
+		Developer           func(childComplexity int) int
+		MergeTarget         func(childComplexity int) int
+		MergeTargetOccupied func(childComplexity int) int
+		ModelID             func(childComplexity int) int
+		Name                func(childComplexity int) int
+		Offers              func(childComplexity int) int
+		Preferred           func(childComplexity int) int
+		Prices              func(childComplexity int) int
+		QuoteVersion        func(childComplexity int) int
+		Version             func(childComplexity int) int
 	}
 
 	CatalogImportTier struct {
@@ -1161,7 +1163,7 @@ type ComplexityRoot struct {
 		CreateChannel                         func(childComplexity int, input ent.CreateChannelInput) int
 		CreateChannelOverrideTemplate         func(childComplexity int, input ent.CreateChannelOverrideTemplateInput) int
 		CreateDataStorage                     func(childComplexity int, input ent.CreateDataStorageInput) int
-		CreateModel                           func(childComplexity int, input ent.CreateModelInput) int
+		CreateModel                           func(childComplexity int, input ent.CreateModelInput, editedPrices []*biz.ManualPriceEdit) int
 		CreatePluginUISession                 func(childComplexity int, pluginID string, entry string) int
 		CreateProject                         func(childComplexity int, input ent.CreateProjectInput) int
 		CreatePrompt                          func(childComplexity int, input ent.CreatePromptInput) int
@@ -2665,7 +2667,7 @@ type MutationResolver interface {
 	ClearCache(ctx context.Context, input ClearCacheInput) (*ClearCachePayload, error)
 	UpdateClaudeCodeSafeguardsSettings(ctx context.Context, input biz.ClaudeCodeSafeguardsConfig) (bool, error)
 	ResetClaudeCodeSafeguardsSettings(ctx context.Context) (bool, error)
-	CreateModel(ctx context.Context, input ent.CreateModelInput) (*ent.Model, error)
+	CreateModel(ctx context.Context, input ent.CreateModelInput, editedPrices []*biz.ManualPriceEdit) (*ent.Model, error)
 	BulkCreateModels(ctx context.Context, inputs []*ent.CreateModelInput) ([]*ent.Model, error)
 	UpdateModel(ctx context.Context, id objects.GUID, input ent.UpdateModelInput, editedPrices []*biz.ManualPriceEdit, expectedUpdatedAt *time.Time) (*ent.Model, error)
 	DeleteModel(ctx context.Context, id objects.GUID) (bool, error)
@@ -4097,6 +4099,18 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.CatalogImportRow.Developer(childComplexity), true
+	case "CatalogImportRow.mergeTarget":
+		if e.complexity.CatalogImportRow.MergeTarget == nil {
+			break
+		}
+
+		return e.complexity.CatalogImportRow.MergeTarget(childComplexity), true
+	case "CatalogImportRow.mergeTargetOccupied":
+		if e.complexity.CatalogImportRow.MergeTargetOccupied == nil {
+			break
+		}
+
+		return e.complexity.CatalogImportRow.MergeTargetOccupied(childComplexity), true
 	case "CatalogImportRow.modelID":
 		if e.complexity.CatalogImportRow.ModelID == nil {
 			break
@@ -7228,7 +7242,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.complexity.Mutation.CreateModel(childComplexity, args["input"].(ent.CreateModelInput)), true
+		return e.complexity.Mutation.CreateModel(childComplexity, args["input"].(ent.CreateModelInput), args["editedPrices"].([]*biz.ManualPriceEdit)), true
 	case "Mutation.createPluginUISession":
 		if e.complexity.Mutation.CreatePluginUISession == nil {
 			break
@@ -14661,6 +14675,11 @@ func (ec *executionContext) field_Mutation_createModel_args(ctx context.Context,
 		return nil, err
 	}
 	args["input"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "editedPrices", ec.unmarshalOManualPriceEdit2ᚕᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐManualPriceEditᚄ)
+	if err != nil {
+		return nil, err
+	}
+	args["editedPrices"] = arg1
 	return args, nil
 }
 
@@ -23550,6 +23569,10 @@ func (ec *executionContext) fieldContext_CatalogImportPreview_rows(_ context.Con
 				return ec.fieldContext_CatalogImportRow_version(ctx, field)
 			case "quoteVersion":
 				return ec.fieldContext_CatalogImportRow_quoteVersion(ctx, field)
+			case "mergeTarget":
+				return ec.fieldContext_CatalogImportRow_mergeTarget(ctx, field)
+			case "mergeTargetOccupied":
+				return ec.fieldContext_CatalogImportRow_mergeTargetOccupied(ctx, field)
 			case "archived":
 				return ec.fieldContext_CatalogImportRow_archived(ctx, field)
 			case "changed":
@@ -23829,6 +23852,64 @@ func (ec *executionContext) fieldContext_CatalogImportRow_quoteVersion(_ context
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _CatalogImportRow_mergeTarget(ctx context.Context, field graphql.CollectedField, obj *biz.CatalogImportRow) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_CatalogImportRow_mergeTarget,
+		func(ctx context.Context) (any, error) {
+			return obj.MergeTarget, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_CatalogImportRow_mergeTarget(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "CatalogImportRow",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _CatalogImportRow_mergeTargetOccupied(ctx context.Context, field graphql.CollectedField, obj *biz.CatalogImportRow) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_CatalogImportRow_mergeTargetOccupied,
+		func(ctx context.Context) (any, error) {
+			return obj.MergeTargetOccupied, nil
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_CatalogImportRow_mergeTargetOccupied(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "CatalogImportRow",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
 		},
 	}
 	return fc, nil
@@ -43059,7 +43140,7 @@ func (ec *executionContext) _Mutation_createModel(ctx context.Context, field gra
 		ec.fieldContext_Mutation_createModel,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.resolvers.Mutation().CreateModel(ctx, fc.Args["input"].(ent.CreateModelInput))
+			return ec.resolvers.Mutation().CreateModel(ctx, fc.Args["input"].(ent.CreateModelInput), fc.Args["editedPrices"].([]*biz.ManualPriceEdit))
 		},
 		nil,
 		ec.marshalNModel2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐModel,
@@ -83548,7 +83629,7 @@ func (ec *executionContext) unmarshalInputManualPriceEdit(ctx context.Context, o
 		switch k {
 		case "field":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("field"))
-			data, err := ec.unmarshalNString2string(ctx, v)
+			data, err := ec.unmarshalNReferencePriceField2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐReferencePriceField(ctx, v)
 			if err != nil {
 				return it, err
 			}
@@ -104441,6 +104522,16 @@ func (ec *executionContext) _CatalogImportRow(ctx context.Context, sel ast.Selec
 			}
 		case "quoteVersion":
 			out.Values[i] = ec._CatalogImportRow_quoteVersion(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "mergeTarget":
+			out.Values[i] = ec._CatalogImportRow_mergeTarget(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "mergeTargetOccupied":
+			out.Values[i] = ec._CatalogImportRow_mergeTargetOccupied(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -130574,6 +130665,23 @@ func (ec *executionContext) marshalNReasoningEffortMapping2githubᚗcomᚋlooplj
 func (ec *executionContext) unmarshalNReasoningEffortMappingInput2githubᚗcomᚋloopljᚋaxonhubᚋllmᚐReasoningEffortMapping(ctx context.Context, v any) (llm.ReasoningEffortMapping, error) {
 	res, err := ec.unmarshalInputReasoningEffortMappingInput(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) unmarshalNReferencePriceField2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐReferencePriceField(ctx context.Context, v any) (biz.ReferencePriceField, error) {
+	tmp, err := graphql.UnmarshalString(v)
+	res := biz.ReferencePriceField(tmp)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNReferencePriceField2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐReferencePriceField(ctx context.Context, sel ast.SelectionSet, v biz.ReferencePriceField) graphql.Marshaler {
+	_ = sel
+	res := graphql.MarshalString(string(v))
+	if res == graphql.Null {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+	}
+	return res
 }
 
 func (ec *executionContext) unmarshalNRemoveUserFromProjectInput2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐRemoveUserFromProjectInput(ctx context.Context, v any) (RemoveUserFromProjectInput, error) {

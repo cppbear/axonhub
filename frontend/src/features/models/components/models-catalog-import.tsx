@@ -30,7 +30,6 @@ import { PriceEditor, defaultSelection, selectStyle, offerKey, useReferencePrice
 import { CatalogSchedule } from './models-catalog-schedule';
 
 const pageSize = 25;
-const suffix = (id: string) => id.slice(id.indexOf('/') + 1);
 
 function PreviewRows({
   preview: latest,
@@ -83,28 +82,29 @@ function PreviewRows({
   const ready =
     choices.length > 0 &&
     choices.every((r) => (r.version || r.type) && r.name.trim() && r.developer.trim() && (!r.version || r.prices.length > 0));
-  const canonicalSuffix = chosen.length ? suffix(chosen[0].modelID) : '';
+  const mergeTarget = chosen[0]?.mergeTarget;
   const canMerge =
-    scope.ignorePrefix &&
+    mergeTarget &&
     chosen.length > 1 &&
-    chosen.every((r) => !r.version && suffix(r.modelID) === canonicalSuffix) &&
-    !rows.some((r) => r.modelID === canonicalSuffix && !selected.has(r.modelID));
+    chosen.every((r) => r.mergeTarget === mergeTarget && !r.mergeTargetOccupied) &&
+    !rows.some((r) => r.modelID === mergeTarget && !selected.has(r.modelID));
   const merge = () => {
+    if (!canMerge) return;
     const offers = [...new Map(chosen.flatMap((r) => r.offers).map((o) => [offerKey(o), o])).values()];
     const group: ImportRow = {
       ...chosen[0],
       mergedVersions: chosen.flatMap((r) => r.mergedVersions ?? [r.quoteVersion]).sort(),
-      modelID: canonicalSuffix,
-      name: canonicalSuffix,
+      modelID: mergeTarget,
+      name: mergeTarget,
       developer: '',
       offers,
       preferred: null,
       aliases: [...new Set(chosen.flatMap((r) => r.aliases))],
     };
     setMerged((prev) => [...prev.filter((r) => !selected.has(r.modelID)), group]);
-    setEdits((prev) => ({ ...prev, [canonicalSuffix]: defaultSelection(group) }));
-    setSelected(new Set([canonicalSuffix]));
-    setExpanded(canonicalSuffix);
+    setEdits((prev) => ({ ...prev, [mergeTarget]: defaultSelection(group) }));
+    setSelected(new Set([mergeTarget]));
+    setExpanded(mergeTarget);
     setPage(0);
   };
   const currentPage = Math.min(page, Math.max(0, Math.ceil(filtered.length / pageSize) - 1));
@@ -155,6 +155,7 @@ function PreviewRows({
         <Button
           variant='outline'
           size='sm'
+          data-testid='catalog-import-select-all'
           onClick={() =>
             setSelected(
               (prev) =>
@@ -174,7 +175,7 @@ function PreviewRows({
         )}
         {canMerge && (
           <Button variant='outline' size='sm' onClick={merge}>
-            {t('models.import.merge', { id: canonicalSuffix })}
+            {t('models.import.merge', { id: mergeTarget })}
           </Button>
         )}
         <span className='text-muted-foreground'>{t('models.import.rowCount', { count: filtered.length })}</span>
@@ -210,6 +211,7 @@ function PreviewRows({
                 />
                 <button
                   type='button'
+                  data-testid={'catalog-import-expand-' + row.modelID}
                   aria-expanded={expanded === row.modelID}
                   className='min-w-0 flex-1 text-left'
                   onClick={() => setExpanded(expanded === row.modelID ? '' : row.modelID)}
@@ -217,6 +219,7 @@ function PreviewRows({
                   <span className='block text-sm font-medium break-all'>{row.modelID}</span>
                   <span className='text-muted-foreground block text-xs'>
                     {t('models.import.filter.' + status)}
+                    {row.mergeTargetOccupied && ' · ' + t('models.import.targetOccupied', { id: row.mergeTarget })}
                     {draft.provider ? ' · ' + draft.provider : ''}
                     {priceSummary ? ' · ' + priceSummary : !row.version && draft.provider ? ' · ' + t('models.import.noPrices') : ''}
                   </span>

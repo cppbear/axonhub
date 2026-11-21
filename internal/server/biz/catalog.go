@@ -88,8 +88,13 @@ func NewCatalogService(system *SystemService, httpClient *httpclient.HttpClient)
 }
 
 func (s *CatalogService) Snapshot(ctx context.Context, filtered bool) (CatalogSnapshot, error) {
+	return s.snapshot(ctx, filtered, false)
+}
+
+// A fresh snapshot joins an in-flight fetch but never returns a previously held result.
+func (s *CatalogService) snapshot(ctx context.Context, filtered, fresh bool) (CatalogSnapshot, error) {
 	for {
-		payload, err := s.ensure(ctx, filtered)
+		payload, err := s.ensure(ctx, filtered, fresh)
 		if errors.Is(err, errCatalogInvalidated) {
 			continue
 		}
@@ -117,20 +122,16 @@ func (s *CatalogService) Invalidate() {
 	s.unfiltered.clear()
 }
 
-func (s *CatalogService) ensure(ctx context.Context, filtered bool) (*catalogPayload, error) {
+func (s *CatalogService) ensure(ctx context.Context, filtered, fresh bool) (*catalogPayload, error) {
 	s.mu.Lock()
 	generation := s.generation
 	held := s.slot(filtered).payload
 	s.mu.Unlock()
-	if held != nil {
+	if held != nil && !fresh {
 		return held, nil
 	}
 	key := fmt.Sprintf("%t/%d", filtered, generation)
 	value, err, _ := s.sf.Do(key, func() (any, error) {
-		if held := s.held(filtered); held != nil {
-			return held, nil
-		}
-
 		// The singleflight load outlives the first caller, including its settings read.
 		ctx := context.WithoutCancel(ctx)
 		upstreamURL := s.system.CatalogSettingsOrDefault(ctx).EffectiveUpstreamURL()
@@ -285,13 +286,6 @@ func (s *CatalogService) slot(filtered bool) *heldCatalog {
 	}
 
 	return &s.unfiltered
-}
-
-func (s *CatalogService) held(filtered bool) *catalogPayload {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.slot(filtered).payload
 }
 
 // hold keeps the payload for holdTTL, then releases it.

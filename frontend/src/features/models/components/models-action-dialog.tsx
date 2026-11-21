@@ -1,4 +1,3 @@
-import { priceFields } from '../data/catalog-import';
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { format } from 'date-fns';
 import { useForm } from 'react-hook-form';
@@ -30,9 +29,9 @@ import {
   CreateModelInput,
   createModelInputSchema,
   UpdateModelInput,
-  ModelCard,
   ModelType,
   modelTypeSchema,
+  referencePriceFields,
   normalizeModelRoutingPolicyValue,
   updateModelInputSchema,
 } from '../data/schema';
@@ -134,7 +133,7 @@ export function ModelsActionDialog() {
       const modelCard: CreateModelInput['modelCard'] = { ...currentRow.modelCard };
       if (modelCard.cost && currentRow.missingReferencePrices?.length) {
         modelCard.cost = { ...modelCard.cost };
-        for (const field of priceFields) {
+        for (const field of referencePriceFields) {
           if (currentRow.missingReferencePrices.includes(field)) delete modelCard.cost[field];
         }
       }
@@ -231,7 +230,7 @@ export function ModelsActionDialog() {
         if (normalizedType && modelTypeSchema.safeParse(normalizedType).success) {
           form.setValue('type', normalizedType as ModelType);
         }
-        const modelCard: ModelCard = {
+        const modelCard: CreateModelInput['modelCard'] = {
           reasoning: {
             supported: selectedModel.reasoning?.supported || false,
             default: selectedModel.reasoning?.default || false,
@@ -245,8 +244,8 @@ export function ModelsActionDialog() {
           },
           vision: resolveVision(selectedModel),
           cost: {
-            input: selectedModel.cost?.input || 0,
-            output: selectedModel.cost?.output || 0,
+            input: selectedModel.cost?.input,
+            output: selectedModel.cost?.output,
             cacheRead: selectedModel.cost?.cache_read,
             cacheWrite: selectedModel.cost?.cache_write,
           },
@@ -282,7 +281,7 @@ export function ModelsActionDialog() {
           settings: data.settings,
           remark: data.remark,
         };
-        const editedPrices = priceFields.filter((field) => {
+        const editedPrices = referencePriceFields.filter((field) => {
           const original = currentRow.missingReferencePrices?.includes(field) ? undefined : currentRow.modelCard.cost?.[field];
           return data.modelCard.cost?.[field] !== original;
         }).map((field) => ({ field, missing: data.modelCard.cost?.[field] == null }));
