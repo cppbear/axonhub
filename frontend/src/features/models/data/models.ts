@@ -138,57 +138,62 @@ const MODELS_QUERY = `
   }
 `;
 
-const CREATE_MODEL_MUTATION = `
-  mutation CreateModel($input: CreateModelInput!, $editedPrices: [ManualPriceEdit!]) {
-    createModel(input: $input, editedPrices: $editedPrices) {
-      id
-      createdAt
-      updatedAt
-      missingReferencePrices
-      developer
-      modelID
-      icon
-      type
-      name
-      group
-      modelCard {
-        reasoning {
-          supported
-          default
-        }
-        reasoningEfforts
-        toolCall
-        temperature
-        modalities {
-          input
-          output
-        }
-        vision
-        cost {
-          input
-          output
-          cacheRead
-          cacheWrite
-        }
-        limit {
-          context
-          output
-        }
-        knowledge
-        releaseDate
-        lastUpdated
+const MODEL_MUTATION_FIELDS = `
+  fragment ModelMutationFields on Model {
+    id
+    createdAt
+    updatedAt
+    missingReferencePrices
+    developer
+    modelID
+    icon
+    type
+    name
+    group
+    modelCard {
+      reasoning {
+        supported
+        default
       }
-      settings {
-        disableDeveloperSettingsInheritance
-        loadBalancerStrategy
-        traceStickyMode
-        associations {
-          type
-          priority
-          disabled
-          when {
-            enabled
-            condition {
+      reasoningEfforts
+      toolCall
+      temperature
+      modalities {
+        input
+        output
+      }
+      vision
+      cost {
+        input
+        output
+        cacheRead
+        cacheWrite
+      }
+      limit {
+        context
+        output
+      }
+      knowledge
+      releaseDate
+      lastUpdated
+    }
+    settings {
+      disableDeveloperSettingsInheritance
+      loadBalancerStrategy
+      traceStickyMode
+      associations {
+        type
+        priority
+        disabled
+        when {
+          enabled
+          condition {
+            type
+            logic
+            field
+            operator
+            value
+            conditions {
               type
               logic
               field
@@ -200,257 +205,67 @@ const CREATE_MODEL_MUTATION = `
                 field
                 operator
                 value
-                conditions {
-                  type
-                  logic
-                  field
-                  operator
-                  value
-                }
               }
             }
           }
-          channelModel {
-            channelId
-            modelId
+        }
+        channelModel {
+          channelId
+          modelId
+        }
+        channelRegex {
+          channelId
+          pattern
+        }
+        regex {
+          pattern
+          exclude {
+            channelNamePattern
+            channelIds
+            channelTags
           }
-          channelRegex {
-            channelId
-            pattern
-          }
-          regex {
-            pattern
-            exclude {
-              channelNamePattern
-              channelIds
-              channelTags
-            }
-          }
-          modelId {
-            modelId
-            exclude {
-              channelNamePattern
-              channelIds
-              channelTags
-            }
+        }
+        modelId {
+          modelId
+          exclude {
+            channelNamePattern
+            channelIds
+            channelTags
           }
         }
       }
-      status
-      remark
-      associatedChannelCount
+    }
+    status
+    remark
+    associatedChannelCount
+  }
+`;
+
+const CREATE_MODEL_MUTATION = `
+  mutation CreateModel($input: CreateModelInput!, $editedPrices: [ManualPriceEdit!]) {
+    createModel(input: $input, editedPrices: $editedPrices) {
+      ...ModelMutationFields
     }
   }
+  ${MODEL_MUTATION_FIELDS}
 `;
 
 const BULK_CREATE_MODELS_MUTATION = `
   mutation BulkCreateModels($inputs: [CreateModelInput!]!) {
     bulkCreateModels(inputs: $inputs) {
-      id
-      createdAt
-      updatedAt
-      missingReferencePrices
-      developer
-      modelID
-      icon
-      type
-      name
-      group
-      modelCard {
-        reasoning {
-          supported
-          default
-        }
-        reasoningEfforts
-        toolCall
-        temperature
-        modalities {
-          input
-          output
-        }
-        vision
-        cost {
-          input
-          output
-          cacheRead
-          cacheWrite
-        }
-        limit {
-          context
-          output
-        }
-        knowledge
-        releaseDate
-        lastUpdated
-      }
-      settings {
-        disableDeveloperSettingsInheritance
-        loadBalancerStrategy
-        traceStickyMode
-        associations {
-          type
-          priority
-          disabled
-          when {
-            enabled
-            condition {
-              type
-              logic
-              field
-              operator
-              value
-              conditions {
-                type
-                logic
-                field
-                operator
-                value
-                conditions {
-                  type
-                  logic
-                  field
-                  operator
-                  value
-                }
-              }
-            }
-          }
-          channelModel {
-            channelId
-            modelId
-          }
-          channelRegex {
-            channelId
-            pattern
-          }
-          regex {
-            pattern
-            exclude {
-              channelNamePattern
-              channelIds
-              channelTags
-            }
-          }
-          modelId {
-            modelId
-            exclude {
-              channelNamePattern
-              channelIds
-              channelTags
-            }
-          }
-        }
-      }
-      status
-      remark
-      associatedChannelCount
+      ...ModelMutationFields
     }
   }
+  ${MODEL_MUTATION_FIELDS}
 `;
 
 const UPDATE_MODEL_MUTATION = `
   mutation UpdateModel($id: ID!, $input: UpdateModelInput!, $editedPrices: [ManualPriceEdit!], $expectedVersion: String) {
     updateModel(id: $id, input: $input, editedPrices: $editedPrices, expectedVersion: $expectedVersion) {
-      id
-      createdAt
-      updatedAt
-      missingReferencePrices
-      developer
-      modelID
-      icon
-      type
-      name
-      group
-      modelCard {
-        reasoning {
-          supported
-          default
-        }
-        reasoningEfforts
-        toolCall
-        temperature
-        modalities {
-          input
-          output
-        }
-        vision
-        cost {
-          input
-          output
-          cacheRead
-          cacheWrite
-        }
-        limit {
-          context
-          output
-        }
-        knowledge
-        releaseDate
-        lastUpdated
-      }
-      settings {
-        disableDeveloperSettingsInheritance
-        loadBalancerStrategy
-        traceStickyMode
-        associations {
-          type
-          priority
-          disabled
-          when {
-            enabled
-            condition {
-              type
-              logic
-              field
-              operator
-              value
-              conditions {
-                type
-                logic
-                field
-                operator
-                value
-                conditions {
-                  type
-                  logic
-                  field
-                  operator
-                  value
-                }
-              }
-            }
-          }
-          channelModel {
-            channelId
-            modelId
-          }
-          channelRegex {
-            channelId
-            pattern
-          }
-          regex {
-            pattern
-            exclude {
-              channelNamePattern
-              channelIds
-              channelTags
-            }
-          }
-          modelId {
-            modelId
-            exclude {
-              channelNamePattern
-              channelIds
-              channelTags
-            }
-          }
-        }
-      }
-      status
-      remark
-      associatedChannelCount
+      ...ModelMutationFields
     }
   }
+  ${MODEL_MUTATION_FIELDS}
 `;
 
 const DELETE_MODEL_MUTATION = `
