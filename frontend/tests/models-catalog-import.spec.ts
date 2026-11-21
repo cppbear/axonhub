@@ -12,7 +12,7 @@ test('a filtered batch keeps the quotes originally reviewed across a background 
   let revision = 'first';
   const provider = 'model-test';
   let reads = 0;
-  type Selection = { quoteVersions: string[]; prices: { field: string; action: string; tier?: string }[] };
+  type Selection = { prices: { field: string; action: string; expected?: number; tier?: string }[] };
   let applied: Selection[] = [];
   await page.route('**/admin/graphql', async (route) => {
     const body = route.request().postDataJSON();
@@ -30,14 +30,14 @@ test('a filtered batch keeps the quotes originally reviewed across a background 
     const rows = Array.from({ length: 28 }, (_, i) => {
       const modelID = i < 27 ? 'batch-' + i : 'outside';
       const offer = {
-        provider, modelID, name: modelID, developer: provider, canonical: '', type: 'chat',
+        provider, modelID, name: modelID, developer: provider, identity: 'original', type: 'chat',
         rates: [
           { field: 'input', base: revision === 'first' ? 1 : 2, tiers: [] },
           { field: 'cacheWrite', base: null, tiers: [{ label: 'context 256000', value: 2.5 }] },
         ],
       };
       return {
-        modelID, name: modelID, developer: provider, aliases: [modelID], version: '', quoteVersion: revision,
+        modelID, name: modelID, developer: provider, members: [{id:modelID,identity:'original'}], routes: [], version: '',
         mergeTarget: '', mergeTargetOccupied: false, changed: false, archived: false, offers: [offer], preferred: offer, prices: [],
       };
     });
@@ -74,8 +74,8 @@ test('a filtered batch keeps the quotes originally reviewed across a background 
   await expect.poll(() => reads).toBeGreaterThan(previousReads);
   await dialog.getByTestId('catalog-import-apply').click();
   await expect.poll(() => applied.length).toBe(27);
-  expect(applied.every((row) => row.quoteVersions[0] === 'first')).toBe(true);
+  expect(applied.every((row) => row.prices.find(p => p.field === 'input')?.expected === 1)).toBe(true);
   expect(applied.flatMap((row) => row.prices).filter(price=>price.action === 'TIER')).toEqual([
-    expect.objectContaining({ field: 'cacheWrite', tier: 'context 256000' }),
+    expect.objectContaining({ field: 'cacheWrite', tier: 'context 256000', expected: 2.5 }),
   ]);
 });

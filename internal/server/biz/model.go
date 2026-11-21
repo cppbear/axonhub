@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"github.com/samber/lo"
 	"go.uber.org/fx"
@@ -487,7 +488,33 @@ func (svc *ModelService) UpdateModel(ctx context.Context, id int, input *ent.Upd
 	return svc.UpdateModelWithPriceEdits(ctx, id, input, nil, nil)
 }
 
-func (svc *ModelService) UpdateModelWithPriceEdits(ctx context.Context, id int, input *ent.UpdateModelInput, edited []ManualPriceEdit, expected *time.Time) (*ent.Model, error) {
+func (svc *ModelService) UpdateModelWithPriceEdits(ctx context.Context, id int, input *ent.UpdateModelInput, edited []ManualPriceEdit, expected *string) (*ent.Model, error) {
+	var updated *ent.Model
+	outerTx := ent.TxFromContext(ctx)
+	var unwrap bool
+	err := svc.RunInTransaction(ctx, func(ctx context.Context) error {
+		unwrap = outerTx == nil && ent.TxFromContext(ctx) != nil
+		var err error
+		updated, err = svc.updateModel(ctx, id, input, edited, expected)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if unwrap {
+		updated.Unwrap()
+	}
+	return updated, nil
+}
+
+func lockedModel(ctx context.Context, db *ent.Client, query *ent.ModelQuery) (*ent.Model, error) {
+	if db.Driver().Dialect() != dialect.SQLite {
+		query.Modify(func(s *sql.Selector) { s.ForUpdate() })
+	}
+	return query.Only(ctx)
+}
+
+func (svc *ModelService) updateModel(ctx context.Context, id int, input *ent.UpdateModelInput, edited []ManualPriceEdit, expected *string) (*ent.Model, error) {
 	// Validate regex patterns in settings if provided
 	if input.Settings != nil {
 		if err := svc.validateModelSettings(input.Settings); err != nil {
@@ -504,28 +531,36 @@ func (svc *ModelService) UpdateModelWithPriceEdits(ctx context.Context, id int, 
 		SetNillableStatus(input.Status).
 		SetNillableIcon(input.Icon)
 
-	if expected != nil {
-		mut.Where(model.UpdatedAtEQ(*expected))
-	}
 	if len(edited) > 0 && input.ModelCard == nil {
 		return nil, xerrors.ValidationError("price edits require a model card")
 	}
-	if input.ModelCard != nil {
+	if input.ModelCard != nil || expected != nil {
 		if err := model.Policy.EvalMutation(ctx, mut.Mutation()); err != nil {
 			return nil, err
 		}
 		original, err := authz.RunAsHost(ctx, svc.entFromContext(ctx), "preserve-model-reference-prices", func(ctx context.Context) (*ent.Model, error) {
-			return ent.FromContext(ctx).Model.Get(ctx, id)
+			db := ent.FromContext(ctx)
+			return lockedModel(ctx, db, db.Model.Query().Where(model.IDEQ(id)))
 		})
 		if err != nil {
 			return nil, err
 		}
-		preserveCatalogPrices(original.ModelCard, input.ModelCard)
-		if err := applyManualPriceEdits(input.ModelCard, edited); err != nil {
-			return nil, err
+		if expected != nil {
+			version, err := ModelEditVersion(original)
+			if err != nil {
+				return nil, err
+			}
+			if version != *expected {
+				return nil, xerrors.ValidationError("model changed since it was opened")
+			}
 		}
-		mut.Where(model.UpdatedAtEQ(original.UpdatedAt))
-		mut.SetModelCard(input.ModelCard)
+		if input.ModelCard != nil {
+			preserveCatalogPrices(original.ModelCard, input.ModelCard)
+			if err := applyManualPriceEdits(input.ModelCard, edited); err != nil {
+				return nil, err
+			}
+			mut.SetModelCard(input.ModelCard)
+		}
 	}
 
 	if input.Settings != nil {

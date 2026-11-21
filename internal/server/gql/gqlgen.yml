@@ -79,6 +79,8 @@ models:
     model: github.com/looplj/axonhub/internal/server/biz.CatalogImportStatus
   CatalogPriceAction:
     model: github.com/looplj/axonhub/internal/server/biz.CatalogPriceAction
+  CatalogImportMemberInput:
+    model: github.com/looplj/axonhub/internal/server/biz.CatalogImportMember
   CatalogCheckSettingsInput:
     model: github.com/looplj/axonhub/internal/server/biz.CatalogCheckSettings
   CodexCatalogVersion:

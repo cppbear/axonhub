@@ -14,7 +14,7 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"slices"
+
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -79,16 +79,28 @@ func (f *importFixture) apply(t *testing.T, scope CatalogImportScope, preview *C
 	return lo.Map(results, func(result CatalogImportOutcome, _ int) string { return string(result.Status) })
 }
 
+func memberIDs(sel CatalogImportSelection) []string {
+	return lo.Map(sel.Members, func(m CatalogImportMember, _ int) string { return m.ID })
+}
+
 func selection(t *testing.T, preview *CatalogImportPreview, id string) CatalogImportSelection {
 	t.Helper()
 	row, found := lo.Find(preview.Rows, func(row *CatalogImportRow) bool { return row.ModelID == id })
 	require.True(t, found, id)
-	sel := CatalogImportSelection{ModelID: id, Name: row.Name, Developer: row.Developer, Type: "chat", Version: row.Version, Aliases: row.Aliases, QuoteVersions: []string{row.QuoteVersion}}
+	sel := CatalogImportSelection{ModelID: id, Name: row.Name, Developer: row.Developer, Type: "chat", Version: row.Version, Members: row.Members}
+	for _, route := range row.Routes {
+		request := ""
+		if len(route.Requests) == 1 {
+			request = route.Requests[0]
+		}
+		sel.Routes = append(sel.Routes, CatalogRouteChoice{route.ChannelID, route.Actual, request})
+	}
 	if o := row.Preferred; o != nil {
+		sel.Identity = o.Identity
 		sel.Provider, sel.SourceModelID = o.Provider, o.ModelID
 		for _, rate := range o.Rates {
 			if rate.Base != nil {
-				sel.Prices = append(sel.Prices, CatalogImportPriceInput{Field: rate.Field, Action: CatalogPriceFollow, Provider: o.Provider, ModelID: o.ModelID})
+				sel.Prices = append(sel.Prices, CatalogImportPriceInput{Field: rate.Field, Expected: rate.Base, Identity: o.Identity, Action: CatalogPriceFollow, Provider: o.Provider, ModelID: o.ModelID})
 			}
 		}
 	}
@@ -108,17 +120,17 @@ func TestCatalogImportScopesAndConflicts(t *testing.T) {
 	require.Len(t, preview.Rows, 5)
 	combined := f.preview(t, CatalogImportScope{Channels: true, Providers: []string{"relay"}, IgnorePrefix: true, Tracked: true})
 	require.Len(t, combined.Rows, 5)
-	require.Equal(t, []string{"a/shared", "b/shared"}, selection(t, combined, "shared").Aliases)
+	require.Equal(t, []string{"a/shared", "b/shared"}, memberIDs(selection(t, combined, "shared")))
 	kimi := selection(t, preview, "kimi-k3")
 	require.Equal(t, "moonshot-ai", kimi.Provider)
 	shared := selection(t, preview, "shared")
-	require.Equal(t, []string{"a/shared", "b/shared"}, shared.Aliases)
+	require.Equal(t, []string{"a/shared", "b/shared"}, memberIDs(shared))
 	shared.Developer = "dev"
 	a, b := selection(t, preview, "a/variant"), selection(t, preview, "b/variant")
 	a.ModelID = "variant"
-	a.Aliases = append(a.Aliases, b.Aliases...)
-	a.QuoteVersions = append(a.QuoteVersions, b.QuoteVersions...)
-	slices.Sort(a.QuoteVersions)
+	a.ManualMerge = true
+	a.Members = append(a.Members, b.Members...)
+	a.Routes = append(a.Routes, b.Routes...)
 	unknown := selection(t, preview, "unknown")
 	unknown.Developer = "custom"
 	unknown.Name = kimi.Name
@@ -127,7 +139,7 @@ func TestCatalogImportScopesAndConflicts(t *testing.T) {
 	m := f.db.Model.Query().Where(model.ModelIDEQ("shared")).OnlyX(f.ctx)
 	require.Equal(t, model.StatusDisabled, m.Status)
 	require.Len(t, m.Settings.Associations, 2)
-	require.Equal(t, "b/shared", m.Settings.Associations[1].ModelID.ModelID)
+	require.Equal(t, "b/shared", m.Settings.Associations[1].ChannelModel.ModelID)
 	after := f.preview(t, scope)
 	require.Len(t, after.Rows, 4)
 	f.changeCatalog(strings.Replace(testCatalog, `"input":3`, `"input":4`, 1))
@@ -155,7 +167,7 @@ func TestCatalogImportTierAndManualEdits(t *testing.T) {
 	require.Equal(t, []string{"cacheWrite"}, MissingReferencePrices(m.ModelCard))
 	preview = f.preview(t, scope)
 	sel = selection(t, preview, m.ModelID)
-	sel.Prices = []CatalogImportPriceInput{{Field: "cacheWrite", Action: CatalogPriceTier, Provider: "auriko", ModelID: m.ModelID, Tier: lo.ToPtr("context 256000")}}
+	sel.Prices = []CatalogImportPriceInput{{Field: "cacheWrite", Expected: lo.ToPtr(2.5), Identity: sel.Identity, Action: CatalogPriceTier, Provider: "auriko", ModelID: m.ModelID, Tier: lo.ToPtr("context 256000")}}
 	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, sel))
 	m = f.db.Model.GetX(f.ctx, m.ID)
 	require.Equal(t, 2.5, m.ModelCard.Cost.CacheWrite)
@@ -168,7 +180,7 @@ func TestCatalogImportTierAndManualEdits(t *testing.T) {
 	next = *m.ModelCard
 	next.Cost.Input = 0
 	next.Cost.CacheRead = 0
-	m, err = f.svc.UpdateModelWithPriceEdits(f.ctx, m.ID, &ent.UpdateModelInput{ModelCard: &next}, []ManualPriceEdit{{Field: "input"}, {Field: "cacheRead", Missing: true}}, &m.UpdatedAt)
+	m, err = f.svc.UpdateModelWithPriceEdits(f.ctx, m.ID, &ent.UpdateModelInput{ModelCard: &next}, []ManualPriceEdit{{Field: "input"}, {Field: "cacheRead", Missing: true}}, lo.ToPtr(lo.Must(ModelEditVersion(m))))
 	require.NoError(t, err)
 	require.Equal(t, 0.0, *m.ModelCard.ReferencePrice("input"))
 	require.Nil(t, m.ModelCard.ReferencePrice("cacheRead"))
@@ -246,7 +258,7 @@ func TestCatalogImportProtectsLegacyPricesAndWriteOnlyEditor(t *testing.T) {
 	require.False(t, row.Prices[0].Follow)
 	require.Equal(t, 0.0, *row.Prices[0].Value)
 	sel := selection(t, preview, m.ModelID)
-	sel.Prices = []CatalogImportPriceInput{{Field: "output", Provider: "moonshot-ai", ModelID: m.ModelID, Action: CatalogPriceFollow}}
+	sel.Prices = []CatalogImportPriceInput{{Field: "output", Expected: lo.ToPtr(15.0), Identity: sel.Identity, Provider: "moonshot-ai", ModelID: m.ModelID, Action: CatalogPriceFollow}}
 	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, sel))
 	m = f.db.Model.GetX(f.ctx, m.ID)
 	require.Equal(t, "Existing", m.Name)
@@ -272,15 +284,15 @@ func TestCatalogImportNestedChannelIDs(t *testing.T) {
 	require.Len(t, preview.Rows, 3)
 	a, b := selection(t, preview, "a/vendor/x"), selection(t, preview, "b/vendor/x")
 	a.ModelID, a.Developer = "x", "dev"
-	a.Aliases = append(a.Aliases, b.Aliases...)
-	a.QuoteVersions = append(a.QuoteVersions, b.QuoteVersions...)
-	slices.Sort(a.QuoteVersions)
+	a.ManualMerge = true
+	a.Members = append(a.Members, b.Members...)
+	a.Routes = append(a.Routes, b.Routes...)
 	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, a))
 	stored := f.db.Model.Query().Where(model.ModelIDEQ("x")).OnlyX(f.ctx)
 	require.ElementsMatch(t, []string{"a/vendor/x", "b/vendor/x"}, stored.ModelCard.CatalogAliases)
 	require.Len(t, stored.Settings.Associations, 2)
-	for i, id := range a.Aliases {
-		require.Equal(t, id, stored.Settings.Associations[i].ModelID.ModelID)
+	for i, id := range memberIDs(a) {
+		require.Equal(t, id, stored.Settings.Associations[i].ChannelModel.ModelID)
 	}
 	selection(t, preview, "a/vendor/only")
 }
@@ -341,7 +353,157 @@ func TestCatalogAutomaticallyMergesVerifiedNestedIDs(t *testing.T) {
 	preview := f.preview(t, scope)
 	require.Len(t, preview.Rows, 1)
 	group := selection(t, preview, "shared")
-	require.Equal(t, []string{"a/vendor/shared", "b/vendor/shared"}, group.Aliases)
+	require.Equal(t, []string{"a/vendor/shared", "b/vendor/shared"}, memberIDs(group))
 	group.Developer = "dev"
 	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, group))
+}
+
+func TestCatalogImportLowercasedRoute(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "Vendor/X")
+	ch := f.db.Channel.Query().OnlyX(f.ctx)
+	ch = ch.Update().SetSettings(&objects.ChannelSettings{LowercaseModelID: true}).SaveX(f.ctx)
+	scope := CatalogImportScope{Channels: true}
+	p := f.preview(t, scope)
+	sel := selection(t, p, "Vendor/X")
+	sel.Developer = "dev"
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, sel))
+	m := f.db.Model.Query().OnlyX(f.ctx)
+	route := &Channel{Channel: ch}
+	require.Contains(t, route.GetModelEntries(), "vendor/x")
+	require.Len(t, MatchAssociations(m.Settings.Associations, []*Channel{route}), 1)
+}
+
+func TestCatalogImportUnverifiedOffer(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "private/vendor/x")
+	f.changeCatalog(`{"providers":{"openai":{"models":[{"id":"other/x","canonical_model_id":"other/x","name":"Unrelated X","cost":{"input":45}}]}}}`)
+	p := f.preview(t, CatalogImportScope{Channels: true, IgnorePrefix: true})
+	require.Len(t, p.Rows, 1)
+	require.Len(t, p.Rows[0].Offers, 1)
+	require.Nil(t, p.Rows[0].Preferred)
+}
+
+func TestCatalogCheckScopeUnion(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "kimi-k3")
+	offers := func(scope CatalogImportScope) []string {
+		p := f.preview(t, scope)
+		providers := []string{}
+		for _, row := range p.Rows {
+			if row.ModelID == "kimi-k3" {
+				for _, o := range row.Offers {
+					providers = append(providers, o.Provider)
+				}
+			}
+		}
+		return providers
+	}
+	expected := offers(CatalogImportScope{Channels: true, Tracked: true})
+	require.ElementsMatch(t, []string{"moonshot", "moonshot-ai"}, expected)
+	require.ElementsMatch(t, expected, offers(CatalogImportScope{Channels: true, Tracked: true, Providers: []string{"moonshot"}}))
+}
+
+func TestCatalogImportConcurrentEdit(t *testing.T) {
+	f := catalogFixture(t)
+	start, update := model.DefaultUpdatedAt, model.UpdateDefaultUpdatedAt
+	t.Cleanup(func() { model.DefaultUpdatedAt, model.UpdateDefaultUpdatedAt = start, update })
+	tick := time.Now().UTC().Truncate(time.Second)
+	model.DefaultUpdatedAt = func() time.Time { return tick }
+	model.UpdateDefaultUpdatedAt = func() time.Time { return tick }
+	scope := CatalogImportScope{Providers: []string{"moonshot-ai"}}
+	p := f.preview(t, scope)
+	sel := selection(t, p, "kimi-k3")
+	sel.Prices = nil
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, sel))
+	before := f.preview(t, scope)
+	stale := selection(t, before, "kimi-k3")
+	m := f.db.Model.Query().OnlyX(f.ctx)
+	card := *m.ModelCard
+	card.Cost.Input = 99
+	_, err := f.svc.UpdateModelWithPriceEdits(f.ctx, m.ID, &ent.UpdateModelInput{ModelCard: &card}, []ManualPriceEdit{{Field: "input"}}, lo.ToPtr(lo.Must(ModelEditVersion(m))))
+	require.NoError(t, err)
+	require.Equal(t, 99.0, *f.db.Model.GetX(f.ctx, m.ID).ModelCard.ReferencePrice("input"))
+	require.Equal(t, []string{"conflict"}, f.apply(t, scope, before, stale))
+	require.Equal(t, 99.0, *f.db.Model.GetX(f.ctx, m.ID).ModelCard.ReferencePrice("input"))
+	_, err = f.svc.UpdateModelWithPriceEdits(f.ctx, m.ID, &ent.UpdateModelInput{Name: lo.ToPtr("stale")}, nil, &stale.Version)
+	require.ErrorContains(t, err, "model changed")
+	f.db.Model.UpdateOneID(m.ID).SetModelCard(m.ModelCard).ExecX(f.ctx)
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, before, stale))
+}
+
+func TestCatalogSelectedQuoteAndLatestMetadata(t *testing.T) {
+	for _, tc := range []struct{ name, old, next, status string }{
+		{"selected input", `"input":3,"output":15`, `"input":4,"output":15`, "catalogChanged"},
+		{"unselected output", `"input":3,"output":15`, `"input":3,"output":16`, "applied"},
+		{"unselected provider", `"input":2.9879`, `"input":2.9878`, "applied"},
+		{"selected identity", `"name":"Kimi K3"`, `"name":"Kimi K3","version":"2"`, "catalogChanged"},
+		{"capability and display name", `"name":"Kimi K3"`, `"name":"New display name","limit":{"context":256000}`, "applied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := catalogFixture(t)
+			f.channel(t, channel.StatusEnabled, "kimi-k3")
+			scope := CatalogImportScope{Channels: true}
+			p := f.preview(t, scope)
+			sel := selection(t, p, "kimi-k3")
+			sel.Prices = sel.Prices[:1]
+			f.body.Store(strings.Replace(testCatalog, tc.old, tc.next, 1))
+			require.Equal(t, []string{tc.status}, f.apply(t, scope, p, sel))
+			if tc.name == "capability and display name" {
+				m := f.db.Model.Query().OnlyX(f.ctx)
+				require.Equal(t, 256000, m.ModelCard.Limit.Context)
+				require.Equal(t, "Kimi K3", m.Name)
+			}
+		})
+	}
+}
+
+func TestCatalogManualSubsetAndAmbiguousRoutes(t *testing.T) {
+	f := catalogFixture(t)
+	scope := CatalogImportScope{Channels: true, IgnorePrefix: true}
+	f.channel(t, channel.StatusEnabled, "a/shared", "b/shared", "c/shared")
+	ch := f.db.Channel.Query().OnlyX(f.ctx)
+	settings := &objects.ChannelSettings{HideOriginalModels: true, ModelMappings: []objects.ModelMapping{{From: "public1", To: "a/shared"}, {From: "public2", To: "a/shared"}}}
+	ch.Update().SetSettings(settings).ExecX(f.ctx)
+	p := f.preview(t, scope)
+	require.Len(t, p.Rows, 3)
+	a, b := selection(t, p, "a/shared"), selection(t, p, "b/shared")
+	a.ModelID, a.Developer = "shared", "dev"
+	a.ManualMerge = true
+	a.Members = append(a.Members, b.Members...)
+	a.Routes = append(a.Routes, b.Routes...)
+	require.Equal(t, []string{"conflict"}, f.apply(t, scope, p, a))
+	a.Routes[0].Request = "public2"
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, a))
+	m := f.db.Model.Query().OnlyX(f.ctx)
+	require.Len(t, m.Settings.Associations, 1)
+	require.Equal(t, "public2", m.Settings.Associations[0].ChannelModel.ModelID)
+	require.Equal(t, []string{"a/shared", "b/shared"}, m.ModelCard.CatalogAliases)
+	require.Empty(t, selection(t, f.preview(t, scope), "c/shared").Version)
+}
+
+func TestCatalogFixCurrentAfterProviderRemovesModel(t *testing.T) {
+	f := catalogFixture(t)
+	scope := CatalogImportScope{Providers: []string{"moonshot-ai"}}
+	p := f.preview(t, scope)
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, selection(t, p, "kimi-k3")))
+	p = f.preview(t, scope)
+	edit := selection(t, p, "kimi-k3")
+	edit.Prices = []CatalogImportPriceInput{{Field: "input", Action: CatalogPriceFix}}
+	f.body.Store(`{"providers":{"moonshot-ai":{"models":[]}}}`)
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, edit))
+	m := f.db.Model.Query().OnlyX(f.ctx)
+	require.False(t, m.ModelCard.CatalogPrices["input"].Follow)
+	require.Equal(t, 3.0, *m.ModelCard.ReferencePrice("input"))
+}
+
+func TestCatalogDoesNotConvertAutomaticMergeToManualAtApply(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "a/shared", "b/shared")
+	scope := CatalogImportScope{Channels: true, IgnorePrefix: true}
+	p := f.preview(t, scope)
+	sel := selection(t, p, "shared")
+	sel.Developer = "dev"
+	f.channel(t, channel.StatusDisabled, "c/shared")
+	require.Equal(t, []string{"conflict"}, f.apply(t, scope, p, sel))
 }

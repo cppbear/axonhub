@@ -20,7 +20,18 @@ export function useReferencePriceFormat() {
     t('currencies.format', { val: value, currency: 'USD', locale: i18n.language, minimumFractionDigits: 0, maximumFractionDigits: 12 });
 }
 
-export function defaultSelection(row: ImportRow, offer = row.preferred, replaceSource = false): ImportSelection {
+function defaultRequest(modelID: string, route: ImportRow['routes'][number]) {
+  if (route.requests.includes(modelID)) return modelID;
+  if (route.requests.includes(route.actual)) return route.actual;
+  if (!route.requests.length) return '';
+  return route.requests.length === 1 ? route.requests[0] : undefined;
+}
+
+export function defaultSelection(
+  row: ImportRow,
+  offer = row.offers.find((o) => o.provider === row.preferred?.provider && o.modelID === row.preferred?.modelID) ?? null,
+  replaceSource = false
+): ImportSelection {
   const prices: PriceSelection[] = [];
   for (const field of referencePriceFields) {
     const local = row.prices.find((p) => p.field === field);
@@ -29,13 +40,24 @@ export function defaultSelection(row: ImportRow, offer = row.preferred, replaceS
     const rate = source?.rates.find((r) => r.field === field);
     if (!source || rate?.base == null) continue;
     if (local && local.value === rate.base && local.provider === source.provider && local.modelID === source.modelID) continue;
-    prices.push({ field, action: 'FOLLOW', provider: source.provider, modelID: source.modelID });
+    prices.push({
+      field,
+      action: 'FOLLOW',
+      expected: rate.base,
+      identity: source.identity,
+      provider: source.provider,
+      modelID: source.modelID,
+    });
   }
   return {
     type: offer?.type ? (modelTypeSchema.safeParse(offer.type).data ?? '') : 'chat',
-    quoteVersions: row.mergedVersions ?? [row.quoteVersion],
+    identity: offer?.identity ?? '',
     modelID: row.modelID,
-    aliases: row.aliases,
+    members: row.members,
+    manualMerge: row.manualMerge,
+    routes: row.version
+      ? []
+      : row.routes.map((route) => ({ channelID: route.channelID, actual: route.actual, request: defaultRequest(row.modelID, route) })),
     version: row.version,
     name: row.version ? row.name : offer?.name || row.modelID,
     developer: row.version ? row.developer : offer?.developer || '',
@@ -57,20 +79,13 @@ export function PriceEditor({
   const { t } = useTranslation();
   const offer = row.offers.find((o) => o.provider === draft.provider && o.modelID === draft.sourceModelID);
   const formatPrice = useReferencePriceFormat();
-  const updateField = (field: ReferencePriceField, value: string) => {
-    const prices = draft.prices.filter((p) => p.field !== field);
-    if (value) prices.push({ field, ...JSON.parse(value) });
-    onChange({ ...draft, prices });
-  };
-  const optionValue = (action: PriceSelection['action'], source?: { provider: string; modelID: string }, tier?: string) =>
-    JSON.stringify({ action, provider: source?.provider ?? '', modelID: source?.modelID ?? '', tier });
   function selectOffer(next: Offer | null) {
     const defaults = defaultSelection(row, next, true);
-    const previous = defaultSelection(row, offer);
+    const previous = defaultSelection(row, offer ?? null);
     for (const field of ['name', 'developer', 'type'] as const) {
       if (draft[field] !== previous[field]) defaults[field] = draft[field];
     }
-    onChange(defaults);
+    onChange({ ...defaults, routes: draft.routes });
   }
   return (
     <div className='space-y-3 rounded-md border p-3'>
@@ -97,11 +112,43 @@ export function PriceEditor({
           </label>
         </div>
       )}
-      {row.aliases.length > 1 && (
+      {row.members.length > 1 && (
         <p className='text-xs break-words'>
-          {t('models.import.aliases')}: {row.aliases.join(', ')}
+          {t('models.import.aliases')}: {row.members.map((m) => m.id).join(', ')}
         </p>
       )}
+      {!row.version &&
+        row.routes.map((route, index) => {
+          if (defaultRequest(row.modelID, route)) return null;
+          const key = route.channelID + '/' + route.actual;
+          const label = t('models.import.route', { channel: route.channelName, model: route.actual });
+          if (!route.requests.length)
+            return (
+              <p key={key} className='text-muted-foreground text-xs'>
+                {t('models.import.hiddenRoute', { channel: route.channelName, model: route.actual })}
+              </p>
+            );
+          return (
+            <label key={key} className='grid gap-1 text-sm'>
+              {label}
+              <select
+                className={selectStyle}
+                value={draft.routes[index].request ?? ''}
+                onChange={(e) =>
+                  onChange({
+                    ...draft,
+                    routes: draft.routes.map((r, i) => (i === index ? { ...r, request: e.target.value || undefined } : r)),
+                  })
+                }
+              >
+                <option value=''>{t('models.import.pickRequest')}</option>
+                {route.requests.map((name) => (
+                  <option key={name}>{name}</option>
+                ))}
+              </select>
+            </label>
+          );
+        })}
       <label className='flex flex-wrap items-center gap-2 text-sm'>
         {t('models.import.priceSource')}
         <select
@@ -132,12 +179,17 @@ export function PriceEditor({
             {referencePriceFields.map((field) => {
               const local = row.prices.find((r) => r.field === field);
               const action = draft.prices.find((r) => r.field === field);
-              const actionValue = action ? optionValue(action.action, action.action === 'FIX' ? undefined : action, action.tier) : '';
               const source = row.offers.find((o) => o.provider === action?.provider && o.modelID === action?.modelID) ?? offer;
               const rate = source?.rates.find((r) => r.field === field);
               return (
-                <tr key={field} data-testid={'catalog-price-row-' + field} className='grid grid-cols-2 gap-x-3 gap-y-2 border-t py-3 sm:table-row'>
-                  <th scope='row' className='col-span-2 font-medium sm:py-2 sm:pr-2'>{t('models.modelCard.' + field)}</th>
+                <tr
+                  key={field}
+                  data-testid={'catalog-price-row-' + field}
+                  className='grid grid-cols-2 gap-x-3 gap-y-2 border-t py-3 sm:table-row'
+                >
+                  <th scope='row' className='col-span-2 font-medium sm:py-2 sm:pr-2'>
+                    {t('models.modelCard.' + field)}
+                  </th>
                   <td className='min-w-0 break-words tabular-nums sm:pr-2'>
                     <span className='text-muted-foreground block text-xs sm:hidden'>{t('models.import.currentPrice')}</span>
                     {local?.value == null ? '—' : formatPrice(local.value)}
@@ -165,39 +217,15 @@ export function PriceEditor({
                   </td>
                   <td className='col-span-2 min-w-0'>
                     <span className='text-muted-foreground block text-xs sm:hidden'>{t('models.import.onApply')}</span>
-                    <select
-                      data-testid={'catalog-price-action-' + field}
-                      className={selectStyle + ' w-full sm:w-auto'}
-                      aria-label={t('models.modelCard.' + field)}
-                      value={actionValue}
-                      onChange={(e) => updateField(field, e.target.value)}
-                    >
-                      <option value=''>{t('models.import.keep')}</option>
-                      {local?.follow && <option value={optionValue('FIX')}>{t('models.import.fixCurrent')}</option>}
-                      {row.offers.map((o) => {
-                        const quote = o.rates.find((r) => r.field === field);
-                        if (!quote || (quote.base == null && !quote.tiers.length)) return null;
-                        return (
-                          <optgroup key={offerKey(o)} label={o.provider + ' · ' + o.modelID}>
-                            {quote.base != null && (
-                              <>
-                                <option value={optionValue('FOLLOW', o)}>
-                                  {t('models.import.follow')} · {formatPrice(quote.base)}
-                                </option>
-                                <option value={optionValue('FIX_BASE', o)}>
-                                  {t('models.import.fixBase')} · {formatPrice(quote.base)}
-                                </option>
-                              </>
-                            )}
-                            {quote.tiers.map((tier) => (
-                              <option key={tier.label} value={optionValue('TIER', o, tier.label)}>
-                                {t('models.import.fixTier', { tier: tier.label, price: formatPrice(tier.value) })}
-                              </option>
-                            ))}
-                          </optgroup>
-                        );
-                      })}
-                    </select>
+                    <PriceActionSelect
+                      row={row}
+                      field={field}
+                      value={action}
+                      onChange={(choice) => {
+                        const prices = draft.prices.filter((p) => p.field !== field);
+                        onChange({ ...draft, prices: choice ? [...prices, choice] : prices });
+                      }}
+                    />
                   </td>
                 </tr>
               );
@@ -209,5 +237,69 @@ export function PriceEditor({
         <p className='text-muted-foreground text-xs'>{t('models.import.flat')}</p>
       )}
     </div>
+  );
+}
+
+function PriceActionSelect({
+  row,
+  field,
+  value,
+  onChange,
+}: {
+  row: ImportRow;
+  field: ReferencePriceField;
+  value?: PriceSelection;
+  onChange: (value?: PriceSelection) => void;
+}) {
+  const { t } = useTranslation();
+  const format = useReferencePriceFormat();
+  const choices: PriceSelection[] = [];
+  function option(label: string, choice: PriceSelection) {
+    const index = choices.push(choice) - 1;
+    return (
+      <option key={index} value={index}>
+        {label}
+      </option>
+    );
+  }
+  const fixed =
+    row.prices.find((p) => p.field === field)?.follow &&
+    option(t('models.import.fixCurrent'), { field, action: 'FIX', provider: '', modelID: '' });
+  const groups = row.offers.map((o) => {
+    const rate = o.rates.find((r) => r.field === field);
+    if (!rate || (rate.base == null && !rate.tiers.length)) return null;
+    const source = { field, provider: o.provider, modelID: o.modelID, identity: o.identity };
+    return (
+      <optgroup key={offerKey(o)} label={o.provider + ' · ' + o.modelID}>
+        {rate.base != null &&
+          option(t('models.import.follow') + ' · ' + format(rate.base), { ...source, action: 'FOLLOW', expected: rate.base })}
+        {rate.base != null &&
+          option(t('models.import.fixBase') + ' · ' + format(rate.base), { ...source, action: 'FIX_BASE', expected: rate.base })}
+        {rate.tiers.map((tier) =>
+          option(t('models.import.fixTier', { tier: tier.label, price: format(tier.value) }), {
+            ...source,
+            action: 'TIER',
+            tier: tier.label,
+            expected: tier.value,
+          })
+        )}
+      </optgroup>
+    );
+  });
+  const selected = choices.findIndex(
+    (c) => c.action === value?.action && c.provider === value.provider && c.modelID === value.modelID && c.tier === value.tier
+  );
+  return (
+    <select
+      data-testid={'catalog-price-action-' + field}
+      aria-label={t('models.modelCard.' + field)}
+      className={selectStyle + ' w-full sm:w-auto'}
+      value={selected}
+      onChange={(e) => onChange(choices[Number(e.target.value)])}
+    >
+      <option value={-1}>{t('models.import.keep')}</option>
+      {fixed}
+      {groups}
+    </select>
   );
 }

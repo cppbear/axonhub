@@ -8,8 +8,8 @@ package gql
 import (
 	"context"
 	"fmt"
-	"time"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
@@ -19,6 +19,22 @@ import (
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/samber/lo"
 )
+
+// EditVersion is the resolver for the editVersion field.
+func (r *modelResolver) EditVersion(ctx context.Context, obj *ent.Model) (string, error) {
+	// Ent creates return the input timestamp, which may be more precise than the stored value.
+	if root := graphql.GetRootFieldContext(ctx); root != nil && (root.Field.Name == "createModel" || root.Field.Name == "bulkCreateModels") {
+		err := r.modelService.RunInTransaction(ctx, func(ctx context.Context) error {
+			var err error
+			obj, err = ent.FromContext(ctx).Model.Get(ctx, obj.ID)
+			return err
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+	return biz.ModelEditVersion(obj)
+}
 
 // MissingReferencePrices is the resolver for the missingReferencePrices field.
 func (r *modelResolver) MissingReferencePrices(ctx context.Context, obj *ent.Model) ([]string, error) {
@@ -41,8 +57,8 @@ func (r *mutationResolver) BulkCreateModels(ctx context.Context, inputs []*ent.C
 }
 
 // UpdateModel is the resolver for the updateModel field.
-func (r *mutationResolver) UpdateModel(ctx context.Context, id objects.GUID, input ent.UpdateModelInput, editedPrices []*biz.ManualPriceEdit, expectedUpdatedAt *time.Time) (*ent.Model, error) {
-	return r.modelService.UpdateModelWithPriceEdits(ctx, id.ID, &input, lo.FromSlicePtr(editedPrices), expectedUpdatedAt)
+func (r *mutationResolver) UpdateModel(ctx context.Context, id objects.GUID, input ent.UpdateModelInput, editedPrices []*biz.ManualPriceEdit, expectedVersion *string) (*ent.Model, error) {
+	return r.modelService.UpdateModelWithPriceEdits(ctx, id.ID, &input, lo.FromSlicePtr(editedPrices), expectedVersion)
 }
 
 // DeleteModel is the resolver for the deleteModel field.

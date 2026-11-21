@@ -57,13 +57,13 @@ function PreviewRows({
     if (selected.size === 0 && !Object.keys(edits).length && !merged.length) setPreview(latest);
   }, [latest, selected, edits, merged]);
   const rows = useMemo(() => {
-    const mergedIDs = new Set(merged.flatMap((r) => r.aliases));
-    return [...merged, ...preview.rows.filter((r) => !r.aliases.some((id) => mergedIDs.has(id)))];
+    const mergedIDs = new Set(merged.flatMap((r) => r.members.map((m) => m.id)));
+    return [...merged, ...preview.rows.filter((r) => !r.members.some(({ id }) => mergedIDs.has(id)))];
   }, [merged, preview.rows]);
   const draftFor = (row: ImportRow) => edits[row.modelID] ?? defaultSelection(row);
   const filtered = rows.filter(
     (r) =>
-      (!query || [r.modelID, r.name, ...r.aliases].some((id) => id.toLowerCase().includes(query.toLowerCase()))) &&
+      (!query || [r.modelID, r.name, ...r.members.map((m) => m.id)].some((id) => id.toLowerCase().includes(query.toLowerCase()))) &&
       (filter === 'all' ||
         (filter === 'new' && !r.version) ||
         (filter === 'changed' && r.changed) ||
@@ -81,7 +81,14 @@ function PreviewRows({
   const choices = chosen.map(draftFor);
   const ready =
     choices.length > 0 &&
-    choices.every((r) => (r.version || r.type) && r.name.trim() && r.developer.trim() && (!r.version || r.prices.length > 0));
+    choices.every(
+      (r) =>
+        r.routes.every((route) => route.request !== undefined) &&
+        (r.version || r.type) &&
+        r.name.trim() &&
+        r.developer.trim() &&
+        (!r.version || r.prices.length > 0)
+    );
   const mergeTarget = chosen[0]?.mergeTarget;
   const canMerge =
     mergeTarget &&
@@ -93,13 +100,14 @@ function PreviewRows({
     const offers = [...new Map(chosen.flatMap((r) => r.offers).map((o) => [offerKey(o), o])).values()];
     const group: ImportRow = {
       ...chosen[0],
-      mergedVersions: chosen.flatMap((r) => r.mergedVersions ?? [r.quoteVersion]).sort(),
+      manualMerge: true,
+      members: chosen.flatMap((r) => r.members),
+      routes: chosen.flatMap((r) => r.routes),
       modelID: mergeTarget,
       name: mergeTarget,
       developer: '',
       offers,
       preferred: null,
-      aliases: [...new Set(chosen.flatMap((r) => r.aliases))],
     };
     setMerged((prev) => [...prev.filter((r) => !selected.has(r.modelID)), group]);
     setEdits((prev) => ({ ...prev, [mergeTarget]: defaultSelection(group) }));
@@ -190,10 +198,7 @@ function PreviewRows({
           else if (!row.preferred && !draft.provider) status = 'chooseSource';
           const priceSummary = draft.prices
             .map((a) => {
-              const quote = row.offers
-                .find((o) => o.provider === a.provider && o.modelID === a.modelID)
-                ?.rates.find((r) => r.field === a.field);
-              const next = a.action === 'TIER' ? quote?.tiers.find((v) => v.label === a.tier)?.value : quote?.base;
+              const next = a.expected;
               const current = row.prices.find((r) => r.field === a.field)?.value;
               return a.action === 'FIX'
                 ? t('models.import.fixCurrent')

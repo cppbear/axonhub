@@ -285,7 +285,7 @@ export function ModelsActionDialog() {
           const original = currentRow.missingReferencePrices?.includes(field) ? undefined : currentRow.modelCard.cost?.[field];
           return data.modelCard.cost?.[field] !== original;
         }).map((field) => ({ field, missing: data.modelCard.cost?.[field] == null }));
-        await updateModel.mutateAsync({ id: currentRow.id, input: updateData, editedPrices, expectedUpdatedAt: currentRow.editVersion });
+        await updateModel.mutateAsync({ id: currentRow.id, input: updateData, editedPrices, expectedVersion: currentRow.editVersion });
       } else {
         await createModel.mutateAsync(data);
       }

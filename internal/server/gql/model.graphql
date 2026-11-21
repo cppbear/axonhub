@@ -218,6 +218,7 @@ type UnassociatedChannel {
 }
 
 extend type Model {
+  editVersion: String! @goField(forceResolver: true)
   missingReferencePrices: [String!]! @goField(forceResolver: true)
   associatedChannelCount: Int! @goField(forceResolver: true)
 }
@@ -238,7 +239,7 @@ extend type Query {
 extend type Mutation {
   createModel(input: CreateModelInput!, editedPrices: [ManualPriceEdit!]): Model!
   bulkCreateModels(inputs: [CreateModelInput!]!): [Model!]!
-  updateModel(id: ID!, input: UpdateModelInput!, editedPrices: [ManualPriceEdit!], expectedUpdatedAt: Time): Model!
+  updateModel(id: ID!, input: UpdateModelInput!, editedPrices: [ManualPriceEdit!], expectedVersion: String): Model!
   deleteModel(id: ID!): Boolean!
   updateModelStatus(id: ID!, status: ModelStatus!): Boolean!
   bulkArchiveModels(ids: [ID!]!): Boolean!
@@ -267,7 +268,7 @@ type CatalogImportTier {
 }
 
 type CatalogImportRate {
-  field: String!
+  field: ReferencePriceField!
   base: Float
   tiers: [CatalogImportTier!]!
 }
@@ -278,25 +279,30 @@ type CatalogImportOffer {
   name: String!
   developer: String!
   type: String!
-  canonical: String!
+  identity: String!
   rates: [CatalogImportRate!]!
 }
 
 type CatalogImportLocalPrice {
-  field: String!
+  field: ReferencePriceField!
   value: Float
   follow: Boolean!
   provider: String!
   modelID: String!
 }
 
+type CatalogImportMember { id: String!, identity: String! }
+input CatalogImportMemberInput { id: String!, identity: String! }
+type CatalogImportRoute { channelID: Int!, channelName: String!, actual: String!, requests: [String!]! }
+input CatalogRouteChoice { channelID: Int!, actual: String!, request: String! }
+
 type CatalogImportRow {
   modelID: String!
   name: String!
   developer: String!
-  aliases: [String!]!
+  members: [CatalogImportMember!]!
+  routes: [CatalogImportRoute!]!
   version: String!
-  quoteVersion: String!
   mergeTarget: String!
   mergeTargetOccupied: Boolean!
   archived: Boolean!
@@ -316,17 +322,21 @@ type CatalogImportPreview {
 
 enum CatalogPriceAction { FOLLOW FIX FIX_BASE TIER }
 input CatalogImportPriceInput {
-  field: String!
+  field: ReferencePriceField!
   action: CatalogPriceAction!
+  expected: Float
+  identity: String! = ""
   provider: String!
   modelID: String!
   tier: String
 }
 input CatalogImportSelection {
+  manualMerge: Boolean! = false
   modelID: String!
-  aliases: [String!]!
+  members: [CatalogImportMemberInput!]!
+  routes: [CatalogRouteChoice!]!
   version: String!
-  quoteVersions: [String!]!
+  identity: String!
   name: String!
   developer: String!
   provider: String!

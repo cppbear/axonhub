@@ -16,8 +16,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
+
+	"github.com/samber/lo"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/model"
@@ -29,17 +34,32 @@ var errCatalogConflict = errors.New("model changed since preview")
 var errCatalogQuoteChanged = errors.New("catalog offer changed since preview")
 var errCatalogSelection = errors.New("invalid catalog selection")
 
+// SQLite cannot upgrade a stale read snapshot to a writer after another connection commits.
+func catalogWriteBusy(err error) bool {
+	var e *sqlite.Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	code := e.Code() & 0xff
+	return code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED
+}
+
 // ApplyCatalogImport re-derives the prices from the reviewed catalog. The
 // client supplies choices and versions, never a replacement price snapshot.
 func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogImportScope, revision string, selections []CatalogImportSelection) ([]CatalogImportOutcome, error) {
-	preview, err := svc.CatalogImportPreview(ctx, scope)
+	snapshot, err := svc.catalog.snapshot(ctx, false, true)
+	if err != nil {
+		return nil, err
+	}
+	preview, err := svc.catalogPreviewFromSnapshot(ctx, scope, snapshot)
 	if err != nil {
 		return nil, err
 	}
 	rows := map[string]*CatalogImportRow{}
 	for _, row := range preview.Rows {
-		for _, id := range row.Aliases {
-			rows[id] = row
+		rows[row.ModelID] = row
+		for _, id := range row.Members {
+			rows[id.ID] = row
 		}
 	}
 	used := map[string]bool{}
@@ -47,26 +67,26 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 	for _, selection := range selections {
 		status := CatalogApplied
 		switch {
-		case slices.ContainsFunc(selection.Aliases, func(id string) bool { return used[id] }):
+		case slices.ContainsFunc(selection.Members, func(m CatalogImportMember) bool { return used[m.ID] }):
 			status = CatalogConflict
 		case preview.Revision != revision:
 			status = CatalogChanged
 		default:
-			err := svc.applyCatalogRow(ctx, preview.Source, rows, selection)
+			err := svc.RunInTransaction(ctx, func(ctx context.Context) error { return svc.applyCatalogRow(ctx, preview.Source, rows, selection) })
 			switch {
 			case errors.Is(err, errCatalogQuoteChanged):
 				status = CatalogChanged
 			case errors.Is(err, errCatalogSelection):
 				status = CatalogInvalid
-			case errors.Is(err, errCatalogConflict), ent.IsConstraintError(err), ent.IsNotFound(err):
+			case errors.Is(err, errCatalogConflict), ent.IsConstraintError(err), ent.IsNotFound(err), catalogWriteBusy(err):
 				status = CatalogConflict
 			case err != nil:
 				return result, fmt.Errorf("apply catalog model %q: %w", selection.ModelID, err)
 			}
 		}
 		if status == CatalogApplied {
-			for _, id := range selection.Aliases {
-				used[id] = true
+			for _, id := range selection.Members {
+				used[id.ID] = true
 			}
 		}
 		result = append(result, CatalogImportOutcome{ModelID: selection.ModelID, Status: status})
@@ -75,99 +95,74 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 }
 
 func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, rows map[string]*CatalogImportRow, sel CatalogImportSelection) error {
-	if len(sel.Aliases) == 0 || strings.TrimSpace(sel.ModelID) == "" {
+	if len(sel.Members) == 0 || strings.TrimSpace(sel.ModelID) == "" {
 		return errCatalogSelection
 	}
-	merged := false
-	versions := map[string]bool{}
-	seenAliases := map[string]bool{}
-	submitted := map[string]bool{}
-	choices := map[catalogOfferKey]*CatalogImportOffer{}
-	for _, id := range sel.Aliases {
-		if submitted[id] {
+	if sel.Version != "" {
+		return svc.updateCatalogPrices(ctx, source, rows[sel.ModelID], sel)
+	}
+	var parts []*CatalogImportRow
+	submitted := map[string]CatalogImportMember{}
+	for _, member := range sel.Members {
+		if _, duplicate := submitted[member.ID]; duplicate {
 			return errCatalogSelection
 		}
-		submitted[id] = true
-		row := rows[id]
-		if row == nil {
+		if rows[member.ID] == nil {
 			return errCatalogConflict
 		}
-		for _, alias := range row.Aliases {
-			seenAliases[alias] = true
+		submitted[member.ID] = member
+		parts = append(parts, rows[member.ID])
+	}
+	parts = lo.Uniq(parts)
+	if len(parts) > 1 && !sel.ManualMerge {
+		return errCatalogConflict
+	}
+	choices := map[catalogOfferKey]*CatalogImportOffer{}
+	var routes []CatalogImportRoute
+	memberCount := 0
+	for _, row := range parts {
+		if row.Version != "" || (row.ModelID != sel.ModelID && row.MergeTargetOccupied) {
+			return errCatalogConflict
 		}
-		versions[row.QuoteVersion] = true
-		if row.ModelID != sel.ModelID {
-			if row.MergeTargetOccupied && row.MergeTarget == sel.ModelID {
+		if row.ModelID != sel.ModelID && (len(parts) < 2 || row.MergeTarget != sel.ModelID) {
+			return errCatalogSelection
+		}
+		memberCount += len(row.Members)
+		for _, member := range row.Members {
+			original, present := submitted[member.ID]
+			if !present || (len(sel.Members) > 1 && original != member) {
 				return errCatalogConflict
 			}
-			if row.MergeTarget != sel.ModelID || row.Version != "" || len(sel.Aliases) < 2 {
-				return errCatalogSelection
-			}
-			merged = true
-		}
-		if row.Archived {
-			return errCatalogConflict
 		}
 		for _, o := range row.Offers {
 			choices[catalogOfferKey{o.Provider, o.ModelID}] = o
 		}
+		routes = append(routes, row.Routes...)
 	}
-	if !slices.Equal(sortedStringKeys(versions), sel.QuoteVersions) {
-		return errCatalogQuoteChanged
-	}
-	if len(seenAliases) != len(sel.Aliases) {
-		return errCatalogSelection
-	}
-	// A bare candidate with the target ID must be part of a manual merge.
-	if merged && rows[sel.ModelID] != nil && !submitted[sel.ModelID] {
+	if memberCount != len(sel.Members) || (len(parts) > 1 && rows[sel.ModelID] != nil && !slices.Contains(parts, rows[sel.ModelID])) {
 		return errCatalogSelection
 	}
 	db := svc.entFromContext(ctx)
-	current, err := db.Model.Query().Where(model.ModelIDEQ(sel.ModelID)).Only(ctx)
-	if err != nil && !ent.IsNotFound(err) {
-		return err
-	}
-	var card *objects.ModelCard
-	primary := choices[catalogOfferKey{sel.Provider, sel.SourceModelID}]
-	if sel.Provider != "" && primary == nil {
+	if strings.TrimSpace(sel.Name) == "" || strings.TrimSpace(sel.Developer) == "" {
 		return errCatalogSelection
 	}
-	if current != nil {
-		if sel.Version != modelCatalogVersion(current) || current.Status == model.StatusArchived || source == catalogSourceFallback {
-			return errCatalogConflict
-		}
-		card = current.ModelCard
-	} else {
-		if sel.Version != "" {
-			return errCatalogConflict
-		}
-		if strings.TrimSpace(sel.Name) == "" || strings.TrimSpace(sel.Developer) == "" {
-			return errCatalogSelection
-		}
-		card = newImportCard(primary)
-		if len(sel.Aliases) > 1 {
-			card.CatalogAliases = slices.Clone(sel.Aliases)
-		}
+	primary := choices[catalogOfferKey{sel.Provider, sel.SourceModelID}]
+	if sel.Provider != "" && (primary == nil || primary.Identity != sel.Identity) {
+		return errCatalogQuoteChanged
 	}
-	if card == nil {
-		card = &objects.ModelCard{}
-	}
-	if card.CatalogPrices == nil {
-		card.CatalogPrices = map[string]objects.CatalogPrice{}
+	card := newImportCard(primary)
+	if len(sel.Members) > 1 {
+		card.CatalogAliases = sortedStringKeys(submitted)
 	}
 	if err := applyCatalogPrices(card, choices, sel.Prices); err != nil {
 		return err
 	}
-	if current != nil {
-		if len(sel.Prices) == 0 {
-			return nil
-		}
-		return db.Model.UpdateOneID(current.ID).Where(model.UpdatedAtEQ(current.UpdatedAt)).SetModelCard(card).Exec(ctx)
-	}
 	settings := &objects.ModelSettings{LoadBalancerStrategy: "default", TraceStickyMode: "default"}
-	for _, id := range sel.Aliases {
-		settings.Associations = append(settings.Associations, &objects.ModelAssociation{Type: "model", ModelID: &objects.ModelIDAssociation{ModelID: id}})
+	associations, err := catalogAssociations(sel, routes)
+	if err != nil {
+		return err
 	}
+	settings.Associations = associations
 	typ := model.Type(sel.Type)
 	if model.TypeValidator(typ) != nil {
 		return errCatalogSelection
@@ -181,31 +176,105 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, row
 	return db.Model.Create().SetDeveloper(sel.Developer).SetModelID(sel.ModelID).SetName(sel.Name).SetGroup(group).SetIcon(sel.Developer).SetType(typ).SetSettings(settings).SetModelCard(card).Exec(ctx)
 }
 
+func (svc *ModelService) updateCatalogPrices(ctx context.Context, source string, row *CatalogImportRow, sel CatalogImportSelection) error {
+	db := svc.entFromContext(ctx)
+	current, err := lockedModel(ctx, db, db.Model.Query().Where(model.ModelIDEQ(sel.ModelID)))
+	if err != nil {
+		return err
+	}
+	version, err := ModelEditVersion(current)
+	if err != nil {
+		return err
+	}
+	if version != sel.Version || current.Status == model.StatusArchived || source == catalogSourceFallback {
+		return errCatalogConflict
+	}
+	if len(sel.Prices) == 0 {
+		return nil
+	}
+	offers := map[catalogOfferKey]*CatalogImportOffer{}
+	if row != nil && row.ModelID == sel.ModelID {
+		for _, o := range row.Offers {
+			offers[catalogOfferKey{o.Provider, o.ModelID}] = o
+		}
+	}
+	next := objects.ModelCard{}
+	if current.ModelCard != nil {
+		next = *current.ModelCard
+		next.CatalogPrices = maps.Clone(next.CatalogPrices)
+	}
+	if err := applyCatalogPrices(&next, offers, sel.Prices); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current.ModelCard, &next) {
+		return nil
+	}
+	return db.Model.UpdateOneID(current.ID).SetModelCard(&next).Exec(ctx)
+}
+
+// Resolve each reviewed (channel, upstream model) against its currently exposed request names.
+func catalogAssociations(sel CatalogImportSelection, routes []CatalogImportRoute) ([]*objects.ModelAssociation, error) {
+	type key struct {
+		channel int
+		actual  string
+	}
+	choices := map[key]string{}
+	for _, choice := range sel.Routes {
+		choices[key{choice.ChannelID, choice.Actual}] = choice.Request
+	}
+	if len(choices) != len(routes) || len(choices) != len(sel.Routes) {
+		return nil, errCatalogConflict
+	}
+	configured := map[string]bool{}
+	associations := []*objects.ModelAssociation{}
+	for _, route := range routes {
+		configured[route.Actual] = true
+		request, ok := choices[key{route.ChannelID, route.Actual}]
+		if !ok {
+			return nil, errCatalogConflict
+		}
+		if request == "" && len(route.Requests) == 0 {
+			continue
+		}
+		if !slices.Contains(route.Requests, request) {
+			return nil, errCatalogConflict
+		}
+		associations = append(associations, &objects.ModelAssociation{Type: "channel_model", ChannelModel: &objects.ChannelModelAssociation{ChannelID: route.ChannelID, ModelID: request}})
+	}
+	for _, member := range sel.Members {
+		if !configured[member.ID] {
+			associations = append(associations, &objects.ModelAssociation{Type: "model", ModelID: &objects.ModelIDAssociation{ModelID: member.ID}})
+		}
+	}
+	return associations, nil
+}
+
 func applyCatalogPrices(card *objects.ModelCard, offers map[catalogOfferKey]*CatalogImportOffer, actions []CatalogImportPriceInput) error {
-	seen := map[string]bool{}
+	if card.CatalogPrices == nil {
+		card.CatalogPrices = map[string]objects.CatalogPrice{}
+	}
+	seen := map[ReferencePriceField]bool{}
 	for _, a := range actions {
-		dst := card.Cost.Field(a.Field)
+		dst := card.Cost.Field(string(a.Field))
 		if dst == nil || seen[a.Field] {
 			return errCatalogSelection
 		}
 		seen[a.Field] = true
 		if a.Action == CatalogPriceFix {
-			b := card.CatalogPrices[a.Field]
+			b := card.CatalogPrices[string(a.Field)]
 			b.Follow = false
-			card.CatalogPrices[a.Field] = b
+			card.CatalogPrices[string(a.Field)] = b
 			continue
 		}
 		offer := offers[catalogOfferKey{a.Provider, a.ModelID}]
 		rate := offer.rate(a.Field)
-		if rate == nil {
-			return errCatalogSelection
+		if rate == nil || offer.Identity != a.Identity {
+			return errCatalogQuoteChanged
 		}
 		value := rate.Base
 		switch a.Action {
 		case CatalogPriceFollow, CatalogPriceFixBase:
-			if value == nil {
-				return errCatalogSelection
-			}
+		// Use the reviewed base rate.
 		case CatalogPriceTier:
 			value = nil
 			for _, tier := range rate.Tiers {
@@ -214,14 +283,14 @@ func applyCatalogPrices(card *objects.ModelCard, offers map[catalogOfferKey]*Cat
 					break
 				}
 			}
-			if value == nil {
-				return errCatalogSelection
-			}
 		default:
 			return errCatalogSelection
 		}
+		if value == nil || a.Expected == nil || *value != *a.Expected {
+			return errCatalogQuoteChanged
+		}
 		*dst = *value
-		card.CatalogPrices[a.Field] = objects.CatalogPrice{Provider: a.Provider, ModelID: a.ModelID, Follow: a.Action == CatalogPriceFollow}
+		card.CatalogPrices[string(a.Field)] = objects.CatalogPrice{Provider: a.Provider, ModelID: a.ModelID, Follow: a.Action == CatalogPriceFollow}
 	}
 	return nil
 }

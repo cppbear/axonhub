@@ -23,7 +23,7 @@ export interface Offer {
   modelID: string;
   name: string;
   developer: string;
-  canonical: string;
+  identity: string;
   type: string;
   rates: ImportRate[];
 }
@@ -35,18 +35,18 @@ export interface LocalRate {
   modelID: string;
 }
 export interface ImportRow {
-  mergedVersions?: string[];
+  manualMerge?: boolean;
   mergeTarget: string;
   mergeTargetOccupied: boolean;
   modelID: string;
   name: string;
   developer: string;
-  aliases: string[];
+  members: { id: string; identity: string }[];
+  routes: { channelID: number; channelName: string; actual: string; requests: string[] }[];
   version: string;
-  quoteVersion: string;
   archived: boolean;
   changed: boolean;
-  preferred: Offer | null;
+  preferred: Pick<Offer, 'provider' | 'modelID'> | null;
   offers: Offer[];
   prices: LocalRate[];
 }
@@ -63,17 +63,21 @@ export interface PriceSelection {
   provider: string;
   modelID: string;
   tier?: string;
+  expected?: number;
+  identity?: string;
 }
 export interface ImportSelection {
+  manualMerge?: boolean;
   modelID: string;
   name: string;
   developer: string;
-  aliases: string[];
+  members: ImportRow['members'];
+  routes: { channelID: number; actual: string; request?: string }[];
   version: string;
   provider: string;
   type: string;
   sourceModelID: string;
-  quoteVersions: string[];
+  identity: string;
   prices: PriceSelection[];
 }
 export interface CheckSettings {
@@ -97,12 +101,12 @@ export interface Outcome {
   status: 'applied' | 'invalid' | 'conflict' | 'catalogChanged';
 }
 
-const offerFields = 'provider modelID name developer canonical type rates { field base tiers { label value } }';
+const offerFields = 'provider modelID name developer identity type rates { field base tiers { label value } }';
 const statusFields = 'settings { enabled time timezone providers ignorePrefix } nextCheck lastAttempt lastSuccess failed available changed';
 const previewQuery = `query CatalogImportPreview($scope: CatalogImportScope!) {
   catalogImportPreview(scope: $scope) {
-    source upstreamURL revision providers rows { modelID name developer aliases version quoteVersion archived changed
-      offers { ${offerFields} } preferred { ${offerFields} } mergeTarget mergeTargetOccupied prices { field value follow provider modelID }
+    source upstreamURL revision providers rows { modelID name developer members { id identity } routes { channelID channelName actual requests } version archived changed
+      offers { ${offerFields} } preferred { provider modelID } mergeTarget mergeTargetOccupied prices { field value follow provider modelID }
     }
   }
 }`;

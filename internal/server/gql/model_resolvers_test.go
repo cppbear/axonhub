@@ -104,7 +104,7 @@ func TestQueryModels_ProjectAPIKeyManagerCanReadModels(t *testing.T) {
 }
 
 func TestCreateModelReferencePricesGraphQL(t *testing.T) {
-	db := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=1")
+	db := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	t.Cleanup(func() { _ = db.Close() })
 	srv := NewGraphqlHandlers(Dependencies{Ent: db, ModelService: biz.NewModelService(biz.ModelServiceParams{Ent: db})})
 	api := client.New(srv.Graphql, func(r *client.Request) { r.HTTP = r.HTTP.WithContext(authz.WithTestBypass(r.HTTP.Context())) })
@@ -141,7 +141,7 @@ func TestCreateModelReferencePricesGraphQL(t *testing.T) {
 }
 
 func TestCatalogCheckSitePermissionsAndValidation(t *testing.T) {
-	db := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=1")
+	db := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	t.Cleanup(func() { _ = db.Close() })
 	system := biz.NewSystemService(biz.SystemServiceParams{CacheConfig: xcache.Config{Mode: xcache.ModeMemory}, Ent: db})
 	srv := NewGraphqlHandlers(Dependencies{Ent: db, ModelService: biz.NewModelService(biz.ModelServiceParams{Ent: db, SystemService: system})})

@@ -22,7 +22,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
+
+	"github.com/samber/lo"
 
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
@@ -45,7 +46,7 @@ type CatalogImportTier struct {
 }
 
 type CatalogImportRate struct {
-	Field string
+	Field ReferencePriceField
 	Base  *float64
 	Tiers []CatalogImportTier
 }
@@ -53,22 +54,36 @@ type CatalogImportRate struct {
 type CatalogImportOffer struct {
 	Provider, ModelID, Name, Developer, Canonical, Type string
 	Rates                                               []CatalogImportRate
-	fingerprint                                         string
+	Identity                                            string
 	entry                                               map[string]any
 }
 
 type CatalogImportLocalPrice struct {
-	Field             string
+	Field             ReferencePriceField
 	Value             *float64
 	Follow            bool
 	Provider, ModelID string
 }
 
+type CatalogImportMember struct{ ID, Identity string }
+
+type CatalogImportRoute struct {
+	ChannelID           int
+	ChannelName, Actual string
+	Requests            []string
+}
+
+type CatalogRouteChoice struct {
+	ChannelID       int
+	Actual, Request string
+}
+
 type CatalogImportRow struct {
 	ModelID, Name, Developer, Version string
-	QuoteVersion, MergeTarget         string
+	MergeTarget                       string
 	MergeTargetOccupied               bool
-	Aliases                           []string
+	Members                           []CatalogImportMember
+	Routes                            []CatalogImportRoute
 	Archived, Changed                 bool
 	Offers                            []*CatalogImportOffer
 	Preferred                         *CatalogImportOffer
@@ -91,16 +106,20 @@ const (
 )
 
 type CatalogImportPriceInput struct {
-	Field             string
+	Field             ReferencePriceField
+	Expected          *float64
+	Identity          string
 	Action            CatalogPriceAction
 	Provider, ModelID string
 	Tier              *string
 }
 
 type CatalogImportSelection struct {
+	ManualMerge                                                      bool
 	ModelID, Version, Name, Developer, Provider, SourceModelID, Type string
-	QuoteVersions                                                    []string
-	Aliases                                                          []string
+	Identity                                                         string
+	Members                                                          []CatalogImportMember
+	Routes                                                           []CatalogRouteChoice
 	Prices                                                           []CatalogImportPriceInput
 }
 
@@ -147,7 +166,7 @@ func offerRates(entry map[string]any) []CatalogImportRate {
 	result := make([]CatalogImportRate, 0, len(catalogPriceFields))
 	for _, field := range catalogPriceFields {
 		key := catalogCostKeys[field]
-		rate := CatalogImportRate{Field: field, Base: catalogRate(cost, key), Tiers: []CatalogImportTier{}}
+		rate := CatalogImportRate{Field: ReferencePriceField(field), Base: catalogRate(cost, key), Tiers: []CatalogImportTier{}}
 		for _, raw := range rawTiers {
 			tier, _ := raw.(map[string]any)
 			threshold, _ := tier["tier"].(map[string]any)
@@ -226,6 +245,8 @@ func indexCatalog(data []byte) (*catalogIndex, error) {
 				name = id
 			}
 			offer := &CatalogImportOffer{Provider: provider, ModelID: id, Name: name, Developer: developer, Canonical: canonical, Rates: offerRates(entry), Type: catalogModelType(modelString(entry, "type")), entry: entry}
+			identity, _ := json.Marshal([3]string{canonical, modelString(entry, "version"), modelString(entry, "release_date")})
+			offer.Identity = string(identity)
 			idx.offers[key] = offer
 			idx.exact[id] = append(idx.exact[id], offer)
 			suffix := catalogLastIDSegment(id)
@@ -290,7 +311,7 @@ func shareCatalogIdentity(ids []string, idx *catalogIndex) bool {
 func catalogLocalPrices(card *objects.ModelCard) []CatalogImportLocalPrice {
 	result := make([]CatalogImportLocalPrice, 0, 4)
 	for _, field := range catalogPriceFields {
-		price := CatalogImportLocalPrice{Field: field}
+		price := CatalogImportLocalPrice{Field: ReferencePriceField(field)}
 		if card != nil {
 			binding := card.CatalogPrices[field]
 			price.Follow, price.Provider, price.ModelID = binding.Follow, binding.Provider, binding.ModelID
@@ -301,11 +322,13 @@ func catalogLocalPrices(card *objects.ModelCard) []CatalogImportLocalPrice {
 	return result
 }
 
-func modelCatalogVersion(m *ent.Model) string {
-	return fmt.Sprintf("%d/%s", m.ID, m.UpdatedAt.UTC().Format(time.RFC3339Nano))
+// ModelEditVersion records the persisted fields an edit could overwrite, including price ownership.
+func ModelEditVersion(m *ent.Model) (string, error) {
+	data, err := json.Marshal([]any{m.ID, m.UpdatedAt.UTC(), m.ModelID, m.Type, m.Name, m.Developer, m.Icon, m.Group, m.Status, m.Remark, m.ModelCard, m.Settings})
+	return string(data), err
 }
 
-func (o *CatalogImportOffer) rate(field string) *CatalogImportRate {
+func (o *CatalogImportOffer) rate(field ReferencePriceField) *CatalogImportRate {
 	if o != nil {
 		for i := range o.Rates {
 			if o.Rates[i].Field == field {
@@ -321,7 +344,11 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 	if err != nil {
 		return nil, err
 	}
-	return svc.catalogPreviewFromSnapshot(ctx, scope, snapshot)
+	preview, err := svc.catalogPreviewFromSnapshot(ctx, scope, snapshot)
+	if err == nil && scope.Tracked {
+		preview.Rows = slices.DeleteFunc(preview.Rows, func(row *CatalogImportRow) bool { return row.Version != "" && (!row.Changed || row.Archived) })
+	}
+	return preview, err
 }
 
 func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope CatalogImportScope, snapshot CatalogSnapshot) (*CatalogImportPreview, error) {
@@ -337,14 +364,15 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 	publicURL.User, publicURL.RawQuery, publicURL.Fragment, publicURL.ForceQuery = nil, "", "", false
 	preview := &CatalogImportPreview{UpstreamURL: publicURL.String(), Source: snapshot.Source, Revision: hex.EncodeToString(revision[:]), Providers: idx.providers, Rows: []*CatalogImportRow{}}
 	db := svc.entFromContext(ctx)
-	local, err := db.Model.Query().Select(model.FieldID, model.FieldModelID, model.FieldName, model.FieldDeveloper, model.FieldStatus, model.FieldUpdatedAt, model.FieldModelCard).All(ctx)
+	local, err := db.Model.Query().All(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load global models: %w", err)
 	}
 	existing := map[string]*ent.Model{}
 	importedIDs := map[string]string{}
 	aliases := map[string][]string{}
-	offers := map[string][]*CatalogImportOffer{}
+	channelRoutes := map[string][]CatalogImportRoute{}
+	providerOffers := map[string][]*CatalogImportOffer{}
 	for _, m := range local {
 		existing[m.ModelID] = m
 		if m.ModelCard != nil {
@@ -366,91 +394,92 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 		importedIDs[id] = id
 	}
 	mergeTargets := map[string]string{}
+	allIDs := map[string]bool{}
 	if scope.Channels {
-		channels, err := db.Channel.Query().Where(channel.StatusIn(channel.StatusEnabled, channel.StatusDisabled)).Select(channel.FieldSupportedModels).All(ctx)
+		channels, err := db.Channel.Query().Where(channel.StatusIn(channel.StatusEnabled, channel.StatusDisabled)).
+			Select(channel.FieldID, channel.FieldName, channel.FieldSettings, channel.FieldSupportedModels).Order(ent.Asc(channel.FieldID)).All(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("load configured channel models: %w", err)
 		}
-		groups := map[string][]string{}
-		ids := map[string]bool{}
 		for _, ch := range channels {
-			for _, id := range ch.SupportedModels {
-				if id != "" {
-					ids[id] = true
+			requests := map[string][]string{}
+			for name, entry := range (&Channel{Channel: ch}).GetModelEntries() {
+				requests[entry.ActualModel] = append(requests[entry.ActualModel], name)
+			}
+			for _, actual := range lo.Uniq(ch.SupportedModels) {
+				if actual == "" {
+					continue
 				}
+				slices.Sort(requests[actual])
+				channelRoutes[actual] = append(channelRoutes[actual], CatalogImportRoute{ch.ID, ch.Name, actual, requests[actual]})
+				allIDs[actual] = true
 			}
-		}
-		for _, id := range sortedStringKeys(ids) {
-			if publicID, ok := importedIDs[id]; ok {
-				aliases[publicID] = append(aliases[publicID], id)
-				continue
-			}
-			group := id
-			if scope.IgnorePrefix {
-				group = catalogLastIDSegment(id)
-			}
-			groups[group] = append(groups[group], id)
-		}
-		for target, group := range groups {
-			// A provider may also supply the bare ID in the combined watch scope.
-			if scope.IgnorePrefix && importedIDs[target] == "" && !slices.Contains(group, target) &&
-				slices.ContainsFunc(idx.exact[target], func(o *CatalogImportOffer) bool { return slices.Contains(scope.Providers, o.Provider) }) {
-				group = append(group, target)
-				slices.Sort(group)
-			}
-			occupied := importedIDs[target] != ""
-			if len(group) > 1 && !occupied && shareCatalogIdentity(group, idx) {
-				aliases[target] = group
-				continue
-			}
-			for _, id := range group {
-				aliases[id] = []string{id}
-				if scope.IgnorePrefix && (len(group) > 1 || occupied) {
-					mergeTargets[id] = target
-				}
-			}
-		}
-	}
-	// Provider rows can overlap a channel group before that group has been imported.
-	channelGroups := map[string]string{}
-	for publicID, ids := range aliases {
-		for _, id := range ids {
-			channelGroups[id] = publicID
 		}
 	}
 	for key, offer := range idx.offers {
-		if !slices.Contains(scope.Providers, key.provider) {
+		if slices.Contains(scope.Providers, key.provider) {
+			allIDs[key.id] = true
+			providerOffers[key.id] = append(providerOffers[key.id], offer)
+		}
+	}
+	groups := map[string][]string{}
+	for _, id := range sortedStringKeys(allIDs) {
+		if parent := importedIDs[id]; parent != "" {
+			aliases[parent] = append(aliases[parent], id)
 			continue
 		}
-		id := key.id
-		if grouped, ok := channelGroups[id]; ok {
-			id = grouped
-		} else if parent := importedIDs[id]; parent != "" {
-			id = parent
+		target := id
+		if scope.IgnorePrefix && len(channelRoutes[id]) > 0 {
+			target = catalogLastIDSegment(id)
 		}
-		aliases[id] = append(aliases[id], key.id)
-		offers[id] = append(offers[id], offer)
+		groups[target] = append(groups[target], id)
+	}
+	for target, group := range groups {
+		occupied := importedIDs[target] != ""
+		if len(group) > 1 && !occupied && shareCatalogIdentity(group, idx) {
+			aliases[target] = group
+			continue
+		}
+		for _, id := range group {
+			aliases[id] = []string{id}
+			if scope.IgnorePrefix && (len(group) > 1 || (occupied && id != target)) {
+				mergeTargets[id] = target
+			}
+		}
 	}
 	for _, id := range sortedStringKeys(aliases) {
 		slices.Sort(aliases[id])
 		target := mergeTargets[id]
-		row := &CatalogImportRow{
-			ModelID: id, Name: id, Aliases: slices.Compact(aliases[id]),
-			MergeTarget: target, MergeTargetOccupied: target != "" && importedIDs[target] != "",
-			Offers: []*CatalogImportOffer{}, Prices: []CatalogImportLocalPrice{},
-		}
-		candidates := offers[id]
-		if len(candidates) == 0 {
-			for _, alias := range row.Aliases {
-				candidates = append(candidates, idx.exact[alias]...)
+		row := &CatalogImportRow{ModelID: id, Name: id, MergeTarget: target, MergeTargetOccupied: target != "" && importedIDs[target] != ""}
+		var candidates []*CatalogImportOffer
+		for _, alias := range slices.Compact(aliases[id]) {
+			exact := idx.exact[alias]
+			var identity string
+			if len(aliases[id]) > 1 || target != "" {
+				identities := lo.Uniq(lo.Map(exact, func(o *CatalogImportOffer, _ int) string { return o.Identity }))
+				slices.Sort(identities)
+				// Individual identities are JSON arrays and contain no literal newlines.
+				identity = strings.Join(identities, "\n")
 			}
-			if scope.IgnorePrefix && len(candidates) == 0 {
-				candidates = idx.byLastSegment[catalogLastIDSegment(id)]
+			row.Members = append(row.Members, CatalogImportMember{alias, identity})
+			if routes, configured := channelRoutes[alias]; configured {
+				row.Routes = append(row.Routes, routes...)
+				candidates = append(candidates, exact...)
+			} else {
+				candidates = append(candidates, providerOffers[alias]...)
 			}
 		}
+		candidates = lo.Uniq(candidates)
 		row.Preferred = preferredOffer(candidates)
+		if scope.IgnorePrefix && len(candidates) == 0 {
+			candidates = idx.byLastSegment[catalogLastIDSegment(id)]
+		}
 		if m := existing[id]; m != nil {
-			row.Name, row.Developer, row.Version, row.Archived = m.Name, m.Developer, modelCatalogVersion(m), m.Status == model.StatusArchived
+			row.Name, row.Developer, row.Archived = m.Name, m.Developer, m.Status == model.StatusArchived
+			row.Version, err = ModelEditVersion(m)
+			if err != nil {
+				return nil, err
+			}
 			row.Prices = catalogLocalPrices(m.ModelCard)
 			for _, p := range row.Prices {
 				if p.Provider == "" {
@@ -461,7 +490,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 					continue
 				}
 				candidates = append(candidates, o)
-				if len(offers[id]) == 0 && p.Follow {
+				if len(providerOffers[id]) == 0 && p.Follow {
 					row.Preferred = o
 				}
 				if r := o.rate(p.Field); p.Follow && r != nil && r.Base != nil && (p.Value == nil || *p.Value != *r.Base) {
@@ -471,13 +500,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 		} else if row.Preferred != nil {
 			row.Name, row.Developer = row.Preferred.Name, row.Preferred.Developer
 		}
-		seen := map[*CatalogImportOffer]bool{}
-		for _, o := range candidates {
-			if !seen[o] {
-				row.Offers = append(row.Offers, o)
-				seen[o] = true
-			}
-		}
+		row.Offers = lo.Uniq(candidates)
 		sort.Slice(row.Offers, func(i, j int) bool {
 			a, b := row.Offers[i], row.Offers[j]
 			if a.Provider != b.Provider {
@@ -485,26 +508,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 			}
 			return a.ModelID < b.ModelID
 		})
-		// Include only this candidate and its offers so unrelated catalog updates
-		// do not invalidate a whole administrator-reviewed batch.
-		hash := sha256.New()
-		aliasesJSON, _ := json.Marshal(row.Aliases)
-		hash.Write(aliasesJSON)
-		for _, offer := range row.Offers {
-			if offer.fingerprint == "" {
-				raw, err := json.Marshal(offer.entry)
-				if err != nil {
-					return nil, fmt.Errorf("fingerprint catalog offer: %w", err)
-				}
-				sum := sha256.Sum256(raw)
-				offer.fingerprint = hex.EncodeToString(sum[:])
-			}
-			fmt.Fprintf(hash, "%q/%s", offer.Provider, offer.fingerprint)
-		}
-		row.QuoteVersion = hex.EncodeToString(hash.Sum(nil))
-		if !scope.Tracked || row.Version == "" || (row.Changed && !row.Archived) {
-			preview.Rows = append(preview.Rows, row)
-		}
+		preview.Rows = append(preview.Rows, row)
 	}
 	return preview, nil
 }
