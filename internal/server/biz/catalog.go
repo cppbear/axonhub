@@ -3,6 +3,7 @@ package biz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/llm/httpclient"
 )
+
+var errCatalogInvalidated = errors.New("catalog invalidated during load")
 
 const (
 	catalogSourceUpstream = "upstream"
@@ -71,6 +74,7 @@ type CatalogService struct {
 	mu         sync.Mutex
 	filtered   heldCatalog
 	unfiltered heldCatalog
+	generation uint64
 	holdTTL    time.Duration
 	sf         singleflight.Group
 }
@@ -84,12 +88,22 @@ func NewCatalogService(system *SystemService, httpClient *httpclient.HttpClient)
 }
 
 func (s *CatalogService) Snapshot(ctx context.Context, filtered bool) (CatalogSnapshot, error) {
-	payload, err := s.ensure(ctx, filtered)
-	if err != nil {
-		return CatalogSnapshot{}, err
+	for {
+		payload, err := s.ensure(ctx, filtered)
+		if errors.Is(err, errCatalogInvalidated) {
+			continue
+		}
+		if err != nil {
+			return CatalogSnapshot{}, err
+		}
+		return snapshotFromPayload(payload, filtered), nil
 	}
+}
 
-	return snapshotFromPayload(payload, filtered), nil
+// InvalidateAfterCommit keeps a concurrent reader from refilling the cache
+// from the previous URL while a settings update is still uncommitted.
+func (s *CatalogService) InvalidateAfterCommit(ctx context.Context) {
+	runAfterCommit(ctx, func(context.Context) { s.Invalidate() })
 }
 
 // Invalidate releases both held variants so the next request refetches, e.g.
@@ -98,20 +112,20 @@ func (s *CatalogService) Invalidate() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.generation++
 	s.filtered.clear()
 	s.unfiltered.clear()
 }
 
 func (s *CatalogService) ensure(ctx context.Context, filtered bool) (*catalogPayload, error) {
-	if held := s.held(filtered); held != nil {
+	s.mu.Lock()
+	generation := s.generation
+	held := s.slot(filtered).payload
+	s.mu.Unlock()
+	if held != nil {
 		return held, nil
 	}
-
-	key := "catalog-unfiltered"
-	if filtered {
-		key = "catalog-filtered"
-	}
-
+	key := fmt.Sprintf("%t/%d", filtered, generation)
 	value, err, _ := s.sf.Do(key, func() (any, error) {
 		if held := s.held(filtered); held != nil {
 			return held, nil
@@ -125,7 +139,11 @@ func (s *CatalogService) ensure(ctx context.Context, filtered bool) (*catalogPay
 			return nil, err
 		}
 
-		return s.hold(filtered, data, source, upstreamURL), nil
+		payload := s.hold(filtered, data, source, upstreamURL, generation)
+		if payload == nil {
+			return nil, errCatalogInvalidated
+		}
+		return payload, nil
 	})
 	if err != nil {
 		return nil, err
@@ -277,7 +295,7 @@ func (s *CatalogService) held(filtered bool) *catalogPayload {
 }
 
 // hold keeps the payload for holdTTL, then releases it.
-func (s *CatalogService) hold(filtered bool, data []byte, source, upstreamURL string) *catalogPayload {
+func (s *CatalogService) hold(filtered bool, data []byte, source, upstreamURL string, generation uint64) *catalogPayload {
 	payload := &catalogPayload{
 		data:        data,
 		fetchedAt:   time.Now().UTC(),
@@ -288,6 +306,10 @@ func (s *CatalogService) hold(filtered bool, data []byte, source, upstreamURL st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// A fetch started before a mirror change may finish after its replacement.
+	if s.generation != generation {
+		return nil
+	}
 	slot := s.slot(filtered)
 	slot.clear()
 	slot.payload = payload

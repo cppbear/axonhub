@@ -7,7 +7,7 @@
 //   frontend/src/locales/zh.json
 // 注意事项:
 //   只有主动选择阶梯才将其保存为固定单价，手工价格默认保留。
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useDebounce } from '@/hooks/use-debounce';
 import { usePermissions } from '@/hooks/usePermissions';
@@ -33,7 +33,7 @@ const pageSize = 25;
 const suffix = (id: string) => id.slice(id.indexOf('/') + 1);
 
 function PreviewRows({
-  preview,
+  preview: latest,
   scope,
   onApplied,
 }: {
@@ -53,6 +53,10 @@ function PreviewRows({
   const [merged, setMerged] = useState<ImportRow[]>([]);
   const [expanded, setExpanded] = useState('');
   const [error, setError] = useState('');
+  const [preview, setPreview] = useState(latest);
+  useEffect(() => {
+    if (selected.size === 0 && !Object.keys(edits).length && !merged.length) setPreview(latest);
+  }, [latest, selected, edits, merged]);
   const rows = useMemo(() => {
     const mergedIDs = new Set(merged.flatMap((r) => r.aliases));
     return [...merged, ...preview.rows.filter((r) => !r.aliases.some((id) => mergedIDs.has(id)))];
@@ -76,7 +80,9 @@ function PreviewRows({
     });
   const chosen = rows.filter((r) => selected.has(r.modelID));
   const choices = chosen.map(draftFor);
-  const ready = choices.length > 0 && choices.every((r) => r.name.trim() && r.developer.trim() && (!r.version || r.prices.length > 0));
+  const ready =
+    choices.length > 0 &&
+    choices.every((r) => (r.version || r.type) && r.name.trim() && r.developer.trim() && (!r.version || r.prices.length > 0));
   const canonicalSuffix = chosen.length ? suffix(chosen[0].modelID) : '';
   const canMerge =
     scope.ignorePrefix &&
@@ -375,7 +381,7 @@ export function ModelsCatalogImport() {
                 <p className='text-muted-foreground text-xs break-all'>
                   {t('models.import.' + (data.source === 'fallback' ? 'fallback' : 'source'))} · {data.upstreamURL}
                 </p>
-                <PreviewRows key={JSON.stringify(scope) + data.revision} preview={data} scope={scope} onApplied={setOutcomes} />
+                <PreviewRows key={JSON.stringify(scope)} preview={data} scope={scope} onApplied={setOutcomes} />
               </>
             )}
           </>

@@ -93,7 +93,7 @@ export interface CheckStatus {
 }
 export interface Outcome {
   modelID: string;
-  status: string;
+  status: 'applied' | 'invalid' | 'conflict' | 'catalogChanged';
 }
 
 const offerFields = 'provider modelID name developer canonical type rates { field base tiers { label value } }';

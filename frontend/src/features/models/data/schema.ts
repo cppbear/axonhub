@@ -20,8 +20,8 @@ export const modelModalitiesSchema = z.object({
 export type ModelModalities = z.infer<typeof modelModalitiesSchema>;
 
 export const modelCostSchema = z.object({
-  input: z.number().optional(),
-  output: z.number().optional(),
+  input: z.number(),
+  output: z.number(),
   cacheRead: z.number().optional(),
   cacheWrite: z.number().optional(),
 });
@@ -165,6 +165,8 @@ export const modelSchema = z.object({
 });
 export type Model = z.infer<typeof modelSchema>;
 
+const editableCardSchema = modelCardSchema.extend({ cost: modelCostSchema.partial().optional() });
+
 export const createModelInputSchema = z.object({
   developer: z.string().min(1, 'Developer is required'),
   modelID: z.string().min(1, 'Model ID is required'),
@@ -172,7 +174,7 @@ export const createModelInputSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   icon: z.string().min(1, 'Icon is required'),
   group: z.string().min(1, 'Group is required'),
-  modelCard: modelCardSchema,
+  modelCard: editableCardSchema,
   settings: modelSettingsSchema.optional(),
   status: modelStatusSchema.optional(),
   remark: z.string().optional(),
@@ -186,7 +188,7 @@ export const updateModelInputSchema = z.object({
   name: z.string().min(1, 'Name is required').optional(),
   icon: z.string().min(1, 'Icon is required').optional(),
   group: z.string().min(1, 'Group is required').optional(),
-  modelCard: modelCardSchema.optional(),
+  modelCard: editableCardSchema.optional(),
   settings: modelSettingsSchema.optional(),
   status: modelStatusSchema.optional(),
   remark: z.string().optional().nullable(),

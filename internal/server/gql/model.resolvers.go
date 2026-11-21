@@ -15,6 +15,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/model"
 	"github.com/looplj/axonhub/internal/objects"
+	"github.com/looplj/axonhub/internal/pkg/xerrors"
 	"github.com/looplj/axonhub/internal/scopes"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/samber/lo"
@@ -111,7 +112,7 @@ func (r *mutationResolver) BulkDeleteModels(ctx context.Context, ids []*objects.
 // ApplyCatalogImport is the resolver for the applyCatalogImport field.
 func (r *mutationResolver) ApplyCatalogImport(ctx context.Context, scope biz.CatalogImportScope, revision string, selections []*biz.CatalogImportSelection) ([]*biz.CatalogImportOutcome, error) {
 	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
-		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteChannels)
+		return nil, xerrors.ForbiddenError("permission denied: requires write_channels scope")
 	}
 	results, err := r.modelService.ApplyCatalogImport(authz.WithScopeDecision(ctx, scopes.ScopeWriteChannels), scope, revision, lo.FromSlicePtr(selections))
 	return lo.ToSlicePtr(results), err
@@ -120,7 +121,7 @@ func (r *mutationResolver) ApplyCatalogImport(ctx context.Context, scope biz.Cat
 // SaveCatalogCheckSettings is the resolver for the saveCatalogCheckSettings field.
 func (r *mutationResolver) SaveCatalogCheckSettings(ctx context.Context, input biz.CatalogCheckSettings) (*biz.CatalogCheckStatus, error) {
 	if !scopes.UserHasScope(ctx, scopes.ScopeWriteSettings) {
-		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteSettings)
+		return nil, xerrors.ForbiddenError("permission denied: requires write_settings scope")
 	}
 	return r.modelService.SaveCatalogCheckSettings(ctx, input)
 }
@@ -128,7 +129,7 @@ func (r *mutationResolver) SaveCatalogCheckSettings(ctx context.Context, input b
 // CheckModelCatalogNow is the resolver for the checkModelCatalogNow field.
 func (r *mutationResolver) CheckModelCatalogNow(ctx context.Context) (*biz.CatalogCheckStatus, error) {
 	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
-		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteChannels)
+		return nil, xerrors.ForbiddenError("permission denied: requires write_channels scope")
 	}
 	return r.modelService.CheckModelCatalog(ctx)
 }
@@ -247,7 +248,7 @@ func (r *queryResolver) QueryUnassociatedChannels(ctx context.Context) ([]*biz.U
 // CatalogImportPreview is the resolver for the catalogImportPreview field.
 func (r *queryResolver) CatalogImportPreview(ctx context.Context, scope biz.CatalogImportScope) (*biz.CatalogImportPreview, error) {
 	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
-		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteChannels)
+		return nil, xerrors.ForbiddenError("permission denied: requires write_channels scope")
 	}
 	return r.modelService.CatalogImportPreview(authz.WithScopeDecision(ctx, scopes.ScopeWriteChannels), scope)
 }
@@ -255,7 +256,7 @@ func (r *queryResolver) CatalogImportPreview(ctx context.Context, scope biz.Cata
 // CatalogCheckStatus is the resolver for the catalogCheckStatus field.
 func (r *queryResolver) CatalogCheckStatus(ctx context.Context) (*biz.CatalogCheckStatus, error) {
 	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
-		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteChannels)
+		return nil, xerrors.ForbiddenError("permission denied: requires write_channels scope")
 	}
 	return r.modelService.CatalogCheckStatus(ctx)
 }

@@ -38,7 +38,7 @@ export function defaultSelection(row: ImportRow, offer = row.preferred, replaceS
     prices.push({ field, action: 'FOLLOW', provider: source.provider, modelID: source.modelID });
   }
   return {
-    type: modelTypeSchema.safeParse(offer?.type).data ?? 'chat',
+    type: offer?.type ? (modelTypeSchema.safeParse(offer.type).data ?? '') : 'chat',
     quoteVersions: row.mergedVersions ?? [row.quoteVersion],
     modelID: row.modelID,
     aliases: row.aliases,
@@ -93,6 +93,7 @@ export function PriceEditor({
           <label className='grid text-sm'>
             {t('models.fields.type')}
             <select className={selectStyle} value={draft.type} onChange={(e) => onChange({ ...draft, type: e.target.value })}>
+              {!draft.type && <option value=''>{t('models.import.pickType')}</option>}
               {modelTypeSchema.options.map((type) => (
                 <option key={type} value={type}>
                   {t('models.types.' + type)}

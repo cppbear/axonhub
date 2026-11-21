@@ -23,6 +23,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
+	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/model"
@@ -52,23 +53,28 @@ func catalogFixture(t *testing.T) *importFixture {
 	useCatalogUpstream(t, ctx, sys, catalog, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, f.body.Load().(string)) })
 	return f
 }
+
 func (f *importFixture) changeCatalog(body string) { f.body.Store(body); f.svc.catalog.Invalidate() }
+
 func (f *importFixture) preview(t *testing.T, scope CatalogImportScope) *CatalogImportPreview {
 	t.Helper()
 	preview, err := f.svc.CatalogImportPreview(f.ctx, scope)
 	require.NoError(t, err)
 	return preview
 }
+
 func (f *importFixture) channel(t *testing.T, status channel.Status, ids ...string) {
 	t.Helper()
 	require.NoError(t, f.db.Channel.Create().SetType(channel.TypeOpenai).SetName(string(status)).SetStatus(status).SetCredentials(objects.ChannelCredentials{}).SetSupportedModels(ids).SetDefaultTestModel(ids[0]).Exec(f.ctx))
 }
+
 func (f *importFixture) apply(t *testing.T, scope CatalogImportScope, preview *CatalogImportPreview, selections ...CatalogImportSelection) []string {
 	t.Helper()
 	results, err := f.svc.ApplyCatalogImport(f.ctx, scope, preview.Revision, selections)
 	require.NoError(t, err)
-	return lo.Map(results, func(result CatalogImportOutcome, _ int) string { return result.Status })
+	return lo.Map(results, func(result CatalogImportOutcome, _ int) string { return string(result.Status) })
 }
+
 func selection(t *testing.T, preview *CatalogImportPreview, id string) CatalogImportSelection {
 	t.Helper()
 	row, found := lo.Find(preview.Rows, func(row *CatalogImportRow) bool { return row.ModelID == id })
@@ -84,6 +90,7 @@ func selection(t *testing.T, preview *CatalogImportPreview, id string) CatalogIm
 	}
 	return sel
 }
+
 func TestCatalogImportScopesAndConflicts(t *testing.T) {
 	f := catalogFixture(t)
 	f.channel(t, channel.StatusEnabled, "kimi-k3", "a/shared", "b/shared", "a/variant")
@@ -95,6 +102,9 @@ func TestCatalogImportScopesAndConflicts(t *testing.T) {
 	scope.IgnorePrefix = true
 	preview := f.preview(t, scope)
 	require.Len(t, preview.Rows, 5)
+	combined := f.preview(t, CatalogImportScope{Channels: true, Providers: []string{"relay"}, IgnorePrefix: true, Tracked: true})
+	require.Len(t, combined.Rows, 5)
+	require.Equal(t, []string{"a/shared", "b/shared"}, selection(t, combined, "shared").Aliases)
 	kimi := selection(t, preview, "kimi-k3")
 	require.Equal(t, "moonshot-ai", kimi.Provider)
 	shared := selection(t, preview, "shared")
@@ -126,6 +136,7 @@ func TestCatalogImportScopesAndConflicts(t *testing.T) {
 	f.db.Model.UpdateOneID(m.ID).SetRemark("edited since preview").ExecX(f.ctx)
 	require.Equal(t, []string{"conflict"}, f.apply(t, scope, fresh, selection(t, fresh, "kimi-k3")))
 }
+
 func TestCatalogImportTierAndManualEdits(t *testing.T) {
 	f := catalogFixture(t)
 	scope := CatalogImportScope{Providers: []string{"auriko"}}
@@ -162,6 +173,7 @@ func TestCatalogImportTierAndManualEdits(t *testing.T) {
 	f.changeCatalog(strings.ReplaceAll(testCatalog, "2.5", "4.5"))
 	require.False(t, f.preview(t, scope).Rows[0].Changed)
 }
+
 func TestCatalogCheckOnlyReportsFollowedFieldsAndSubscribedProviders(t *testing.T) {
 	f := catalogFixture(t)
 	scope := CatalogImportScope{Providers: []string{"moonshot-ai"}}
@@ -176,9 +188,11 @@ func TestCatalogCheckOnlyReportsFollowedFieldsAndSubscribedProviders(t *testing.
 	require.Zero(t, state.Available)
 	require.Equal(t, 1, state.Changed)
 	cfg := CatalogCheckSettings{Enabled: true, Time: "08:30", Timezone: "Asia/Shanghai", Providers: scope.Providers}
+	previousSuccess := state.LastSuccess
 	state, err = f.svc.SaveCatalogCheckSettings(f.ctx, cfg)
 	require.NoError(t, err)
 	require.NotNil(t, state.NextCheck)
+	require.Equal(t, previousSuccess, state.LastSuccess)
 	now := time.Date(2026, 11, 22, 0, 30, 0, 0, time.UTC)
 	state, err = f.svc.checkModelCatalog(f.ctx, now, true)
 	require.NoError(t, err)
@@ -208,4 +222,40 @@ func TestCatalogCheckOnlyReportsFollowedFieldsAndSubscribedProviders(t *testing.
 	selected = selection(t, fallback, other.ModelID)
 	selected.Developer = "moonshot"
 	require.Equal(t, []string{"applied"}, f.apply(t, CatalogImportScope{Providers: []string{"moonshot"}}, fallback, selected))
+}
+
+func TestCatalogModelTypes(t *testing.T) {
+	for raw, want := range map[string]string{"image": "image_generation", "video": "video_generation", "reranking": "rerank", "image-generation": "image_generation", "embedding": "embedding", "audio": "audio"} {
+		require.Equal(t, want, catalogModelType(raw))
+	}
+}
+
+func TestCatalogImportProtectsLegacyPricesAndWriteOnlyEditor(t *testing.T) {
+	f := catalogFixture(t)
+	m := f.db.Model.Create().SetModelID("kimi-k3").SetName("Existing").SetGroup("custom").SetDeveloper("custom").SetIcon("custom").SetStatus(model.StatusEnabled).
+		SetSettings(&objects.ModelSettings{}).SetModelCard(&objects.ModelCard{Cost: objects.ModelCardCost{Input: 0, Output: 9}}).SaveX(f.ctx)
+	scope := CatalogImportScope{Providers: []string{"moonshot-ai"}}
+	preview := f.preview(t, scope)
+	row, ok := lo.Find(preview.Rows, func(r *CatalogImportRow) bool { return r.ModelID == m.ModelID })
+	require.True(t, ok)
+	require.False(t, row.Changed)
+	require.False(t, row.Prices[0].Follow)
+	require.Equal(t, 0.0, *row.Prices[0].Value)
+	sel := selection(t, preview, m.ModelID)
+	sel.Prices = []CatalogImportPriceInput{{Field: "output", Provider: "moonshot-ai", ModelID: m.ModelID, Action: CatalogPriceFollow}}
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, sel))
+	m = f.db.Model.GetX(f.ctx, m.ID)
+	require.Equal(t, "Existing", m.Name)
+	require.Equal(t, model.StatusEnabled, m.Status)
+	require.Zero(t, m.ModelCard.Cost.Input)
+	require.Equal(t, 15.0, m.ModelCard.Cost.Output)
+	// A write-only role may submit a whole model card when editing the name.
+	ctx := contexts.WithUser(ent.NewContext(context.Background(), f.db), &ent.User{ID: 1, Scopes: []string{"write_channels"}})
+	_, readErr := f.db.Model.Query().Where(model.IDEQ(m.ID)).OnlyID(ctx)
+	require.Error(t, readErr)
+	card := *m.ModelCard
+	card.CatalogPrices = nil
+	m, err := f.svc.UpdateModel(ctx, m.ID, &ent.UpdateModelInput{ModelCard: &card, Name: lo.ToPtr("Renamed")})
+	require.NoError(t, err)
+	require.True(t, m.ModelCard.CatalogPrices["output"].Follow)
 }

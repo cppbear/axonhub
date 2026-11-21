@@ -38,27 +38,32 @@ type CatalogImportScope struct {
 	Providers             []string
 	IgnorePrefix, Tracked bool
 }
+
 type CatalogImportTier struct {
 	Label string
 	Value float64
 }
+
 type CatalogImportRate struct {
 	Field string
 	Base  *float64
 	Tiers []CatalogImportTier
 }
+
 type CatalogImportOffer struct {
 	Provider, ModelID, Name, Developer, Canonical, Type string
 	Rates                                               []CatalogImportRate
 	fingerprint                                         string
 	entry                                               map[string]any
 }
+
 type CatalogImportLocalPrice struct {
 	Field             string
 	Value             *float64
 	Follow            bool
 	Provider, ModelID string
 }
+
 type CatalogImportRow struct {
 	ModelID, Name, Developer, Version string
 	QuoteVersion                      string
@@ -68,11 +73,13 @@ type CatalogImportRow struct {
 	Preferred                         *CatalogImportOffer
 	Prices                            []CatalogImportLocalPrice
 }
+
 type CatalogImportPreview struct {
 	Source, UpstreamURL, Revision string
 	Providers                     []string
 	Rows                          []*CatalogImportRow
 }
+
 type CatalogPriceAction string
 
 const (
@@ -88,15 +95,30 @@ type CatalogImportPriceInput struct {
 	Provider, ModelID string
 	Tier              *string
 }
+
 type CatalogImportSelection struct {
 	ModelID, Version, Name, Developer, Provider, SourceModelID, Type string
 	QuoteVersions                                                    []string
 	Aliases                                                          []string
 	Prices                                                           []CatalogImportPriceInput
 }
-type CatalogImportOutcome struct{ ModelID, Status string }
+
+type CatalogImportStatus string
+
+const (
+	CatalogApplied  CatalogImportStatus = "applied"
+	CatalogInvalid  CatalogImportStatus = "invalid"
+	CatalogConflict CatalogImportStatus = "conflict"
+	CatalogChanged  CatalogImportStatus = "catalogChanged"
+)
+
+type CatalogImportOutcome struct {
+	ModelID string
+	Status  CatalogImportStatus
+}
 
 type catalogOfferKey struct{ provider, id string }
+
 type catalogIndex struct {
 	offers        map[catalogOfferKey]*CatalogImportOffer
 	exact, suffix map[string][]*CatalogImportOffer
@@ -109,6 +131,7 @@ func catalogSuffix(id string) string {
 	}
 	return id
 }
+
 func catalogRate(raw map[string]any, key string) *float64 {
 	n, ok := raw[key].(float64)
 	if !ok || n < 0 || math.IsInf(n, 0) || math.IsNaN(n) {
@@ -116,6 +139,7 @@ func catalogRate(raw map[string]any, key string) *float64 {
 	}
 	return &n
 }
+
 func offerRates(entry map[string]any) []CatalogImportRate {
 	cost, _ := entry["cost"].(map[string]any)
 	rawTiers, _ := cost["tiers"].([]any)
@@ -147,6 +171,20 @@ func offerRates(entry map[string]any) []CatalogImportRate {
 	}
 	return result
 }
+
+func catalogModelType(raw string) string {
+	switch raw {
+	case "image":
+		return string(model.TypeImageGeneration)
+	case "video":
+		return string(model.TypeVideoGeneration)
+	case "reranking":
+		return string(model.TypeRerank)
+	default:
+		return strings.ReplaceAll(raw, "-", "_")
+	}
+}
+
 func indexCatalog(data []byte) (*catalogIndex, error) {
 	var catalog catalogFile
 	if err := json.Unmarshal(data, &catalog); err != nil {
@@ -186,7 +224,7 @@ func indexCatalog(data []byte) (*catalogIndex, error) {
 			if name == "" {
 				name = id
 			}
-			offer := &CatalogImportOffer{Provider: provider, ModelID: id, Name: name, Developer: developer, Canonical: canonical, Rates: offerRates(entry), Type: strings.ReplaceAll(modelString(entry, "type"), "-", "_"), entry: entry}
+			offer := &CatalogImportOffer{Provider: provider, ModelID: id, Name: name, Developer: developer, Canonical: canonical, Rates: offerRates(entry), Type: catalogModelType(modelString(entry, "type")), entry: entry}
 			idx.offers[key] = offer
 			idx.exact[id] = append(idx.exact[id], offer)
 			suffix := catalogSuffix(id)
@@ -195,6 +233,7 @@ func indexCatalog(data []byte) (*catalogIndex, error) {
 	}
 	return idx, nil
 }
+
 func preferredOffer(offers []*CatalogImportOffer) *CatalogImportOffer {
 	if len(offers) == 1 {
 		return offers[0]
@@ -220,33 +259,33 @@ func preferredOffer(offers []*CatalogImportOffer) *CatalogImportOffer {
 	}
 	return official
 }
-func commonCanonical(ids []string, idx *catalogIndex) string {
-	var canonical, version, release string
+
+func shareCatalogIdentity(ids []string, idx *catalogIndex) bool {
+	identity := map[string]string{}
 	for _, id := range ids {
 		offers := idx.exact[id]
 		if len(offers) == 0 {
-			return ""
+			return false
 		}
-		for _, o := range offers {
-			if o.Canonical == "" || (canonical != "" && o.Canonical != canonical) {
-				return ""
+		for _, offer := range offers {
+			if offer.Canonical == "" {
+				return false
 			}
-			for _, key := range []struct {
-				name string
-				seen *string
-			}{{"version", &version}, {"release_date", &release}} {
-				if value := modelString(o.entry, key.name); value != "" {
-					if *key.seen != "" && *key.seen != value {
-						return ""
-					}
-					*key.seen = value
+			for _, key := range []string{"canonical_model_id", "version", "release_date"} {
+				value := modelString(offer.entry, key)
+				if value == "" {
+					continue
 				}
+				if known := identity[key]; known != "" && known != value {
+					return false
+				}
+				identity[key] = value
 			}
-			canonical = o.Canonical
 		}
 	}
-	return canonical
+	return true
 }
+
 func catalogLocalPrices(card *objects.ModelCard) []CatalogImportLocalPrice {
 	result := make([]CatalogImportLocalPrice, 0, 4)
 	for _, field := range catalogPriceFields {
@@ -260,9 +299,11 @@ func catalogLocalPrices(card *objects.ModelCard) []CatalogImportLocalPrice {
 	}
 	return result
 }
+
 func modelCatalogVersion(m *ent.Model) string {
 	return fmt.Sprintf("%d/%s", m.ID, m.UpdatedAt.UTC().Format(time.RFC3339Nano))
 }
+
 func (o *CatalogImportOffer) rate(field string) *CatalogImportRate {
 	if o != nil {
 		for i := range o.Rates {
@@ -342,7 +383,7 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 		}
 		for suffix, group := range groups {
 			// Keep existing public IDs independent when they already have local configuration.
-			canMerge := len(group) > 1 && commonCanonical(group, idx) != ""
+			canMerge := len(group) > 1 && shareCatalogIdentity(group, idx)
 			for _, id := range group {
 				if id != suffix && existing[id] != nil {
 					canMerge = false
@@ -359,12 +400,21 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 			}
 		}
 	}
+	// Provider rows can overlap a channel group before that group has been imported.
+	channelGroups := map[string]string{}
+	for publicID, ids := range aliases {
+		for _, id := range ids {
+			channelGroups[id] = publicID
+		}
+	}
 	for key, offer := range idx.offers {
 		if !slices.Contains(scope.Providers, key.provider) {
 			continue
 		}
 		id := key.id
-		if parent := importedIDs[id]; parent != "" && existing[id] == nil {
+		if grouped, ok := channelGroups[id]; ok {
+			id = grouped
+		} else if parent := importedIDs[id]; parent != "" && existing[id] == nil {
 			id = parent
 		}
 		if _, ok := aliases[id]; !ok {

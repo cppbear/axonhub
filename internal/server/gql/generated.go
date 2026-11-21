@@ -23379,7 +23379,7 @@ func (ec *executionContext) _CatalogImportOutcome_status(ctx context.Context, fi
 			return obj.Status, nil
 		},
 		nil,
-		ec.marshalNString2string,
+		ec.marshalNCatalogImportStatus2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐCatalogImportStatus,
 		true,
 		true,
 	)
@@ -23392,7 +23392,7 @@ func (ec *executionContext) fieldContext_CatalogImportOutcome_status(_ context.C
 		IsMethod:   false,
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return nil, errors.New("field of type String does not have child fields")
+			return nil, errors.New("field of type CatalogImportStatus does not have child fields")
 		},
 	}
 	return fc, nil
@@ -126221,6 +126221,23 @@ func (ec *executionContext) unmarshalNCatalogImportSelection2ᚕᚖgithubᚗcom�
 func (ec *executionContext) unmarshalNCatalogImportSelection2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐCatalogImportSelection(ctx context.Context, v any) (*biz.CatalogImportSelection, error) {
 	res, err := ec.unmarshalInputCatalogImportSelection(ctx, v)
 	return &res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) unmarshalNCatalogImportStatus2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐCatalogImportStatus(ctx context.Context, v any) (biz.CatalogImportStatus, error) {
+	tmp, err := graphql.UnmarshalString(v)
+	res := biz.CatalogImportStatus(tmp)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNCatalogImportStatus2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐCatalogImportStatus(ctx context.Context, sel ast.SelectionSet, v biz.CatalogImportStatus) graphql.Marshaler {
+	_ = sel
+	res := graphql.MarshalString(string(v))
+	if res == graphql.Null {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+	}
+	return res
 }
 
 func (ec *executionContext) marshalNCatalogImportTier2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐCatalogImportTier(ctx context.Context, sel ast.SelectionSet, v biz.CatalogImportTier) graphql.Marshaler {

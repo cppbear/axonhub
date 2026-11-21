@@ -44,26 +44,26 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 	used := map[string]bool{}
 	result := make([]CatalogImportOutcome, 0, len(selections))
 	for _, selection := range selections {
-		status := "applied"
+		status := CatalogApplied
 		switch {
 		case slices.ContainsFunc(selection.Aliases, func(id string) bool { return used[id] }):
-			status = "conflict"
+			status = CatalogConflict
 		case preview.Revision != revision:
-			status = "catalogChanged"
+			status = CatalogChanged
 		default:
 			err := svc.applyCatalogRow(ctx, scope, preview.Source, rows, selection)
 			switch {
 			case errors.Is(err, errCatalogQuoteChanged):
-				status = "catalogChanged"
+				status = CatalogChanged
 			case errors.Is(err, errCatalogSelection):
-				status = "invalid"
+				status = CatalogInvalid
 			case errors.Is(err, errCatalogConflict), ent.IsConstraintError(err), ent.IsNotFound(err):
-				status = "conflict"
+				status = CatalogConflict
 			case err != nil:
 				return result, fmt.Errorf("apply catalog model %q: %w", selection.ModelID, err)
 			}
 		}
-		if status == "applied" {
+		if status == CatalogApplied {
 			for _, id := range selection.Aliases {
 				used[id] = true
 			}
@@ -80,8 +80,13 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, scope CatalogImpor
 	validID := false
 	versions := map[string]bool{}
 	seenAliases := map[string]bool{}
+	submitted := map[string]bool{}
 	choices := map[catalogOfferKey]*CatalogImportOffer{}
 	for _, id := range sel.Aliases {
+		if submitted[id] {
+			return errCatalogSelection
+		}
+		submitted[id] = true
 		row := rows[id]
 		if row == nil {
 			return errCatalogConflict
@@ -155,12 +160,8 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, scope CatalogImpor
 		return db.Model.UpdateOneID(current.ID).Where(model.UpdatedAtEQ(current.UpdatedAt)).SetModelCard(card).Exec(ctx)
 	}
 	settings := &objects.ModelSettings{LoadBalancerStrategy: "default", TraceStickyMode: "default"}
-	seen := map[string]bool{}
 	for _, id := range sel.Aliases {
-		if !seen[id] {
-			settings.Associations = append(settings.Associations, &objects.ModelAssociation{Type: "model", ModelID: &objects.ModelIDAssociation{ModelID: id}})
-			seen[id] = true
-		}
+		settings.Associations = append(settings.Associations, &objects.ModelAssociation{Type: "model", ModelID: &objects.ModelIDAssociation{ModelID: id}})
 	}
 	typ := model.Type(sel.Type)
 	if model.TypeValidator(typ) != nil {
@@ -297,11 +298,15 @@ func preserveCatalogPrices(old, next *objects.ModelCard, edited []ManualPriceEdi
 		}
 	}
 	for _, edit := range edited {
-		if next.Cost.Field(edit.Field) == nil {
+		value := next.Cost.Field(edit.Field)
+		if value == nil {
 			continue
 		}
 		if next.CatalogPrices == nil {
 			next.CatalogPrices = map[string]objects.CatalogPrice{}
+		}
+		if edit.Missing {
+			*value = 0
 		}
 		next.CatalogPrices[edit.Field] = objects.CatalogPrice{Missing: edit.Missing}
 	}

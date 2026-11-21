@@ -36,6 +36,7 @@ type CatalogCheckSettings struct {
 	Providers    []string `json:"providers"`
 	IgnorePrefix bool     `json:"ignorePrefix"`
 }
+
 type CatalogCheckStatus struct {
 	Settings           CatalogCheckSettings
 	NextCheck          *time.Time
@@ -64,6 +65,7 @@ func (s CatalogCheckSettings) next(now time.Time) (time.Time, error) {
 	}
 	return rule.Next(now.In(zone)), nil
 }
+
 func (svc *ModelService) CatalogCheckStatus(ctx context.Context) (*CatalogCheckStatus, error) {
 	state, _, err := svc.readCatalogCheck(ctx)
 	return state, err
@@ -88,9 +90,7 @@ func (svc *ModelService) readCatalogCheck(ctx context.Context) (*CatalogCheckSta
 	} else if !ent.IsNotFound(err) {
 		return nil, "", err
 	}
-	if !slices.Equal(settings.Providers, state.Settings.Providers) || settings.IgnorePrefix != state.Settings.IgnorePrefix {
-		state = &CatalogCheckStatus{}
-	}
+	// The counts and timestamps describe the last completed check, including after scope changes.
 	state.Settings = settings
 	state.NextCheck = nil
 	if settings.Enabled {
@@ -102,6 +102,7 @@ func (svc *ModelService) readCatalogCheck(ctx context.Context) (*CatalogCheckSta
 	}
 	return state, value, nil
 }
+
 func (svc *ModelService) SaveCatalogCheckSettings(ctx context.Context, settings CatalogCheckSettings) (*CatalogCheckStatus, error) {
 	if _, err := settings.next(time.Now()); err != nil {
 		return nil, err

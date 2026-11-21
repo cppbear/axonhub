@@ -41,7 +41,11 @@ export function CatalogSchedule({
   return (
     <div className='min-h-0 space-y-4 overflow-y-auto text-sm'>
       <section className='space-y-2'>
-        <p>{t('models.import.lastCounts', { available: status.available, changed: status.changed })}</p>
+        <p>
+          {status.lastSuccess
+            ? t('models.import.lastCounts', { available: status.available, changed: status.changed })
+            : t('models.import.neverChecked')}
+        </p>
         <dl className='grid grid-cols-[auto_1fr] gap-x-3 gap-y-1'>
           {(['lastAttempt', 'lastSuccess', 'nextCheck'] as const).map((key) => (
             <div className='contents' key={key}>

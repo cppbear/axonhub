@@ -216,3 +216,32 @@ func TestCatalogService_CancelledCallerDoesNotCauseFallback(t *testing.T) {
 	require.Equal(t, catalogSourceUpstream, snapshot.Source)
 	require.Contains(t, string(snapshot.Data), "gpt-hot")
 }
+
+func TestCatalogService_MirrorChangeDiscardsInflightCacheFill(t *testing.T) {
+	ctx, system, svc := newCatalogTestService(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	useCatalogUpstream(t, ctx, system, svc, func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		_, _ = w.Write([]byte(`{"providers":{"old":{}}}`))
+	})
+	// Use the already established transport for both servers.
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"providers":{"new":{}}}`)) }))
+	t.Cleanup(mirror.Close)
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = svc.Snapshot(ctx, false) })
+	<-started
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }); wg.Wait() }
+	defer finish()
+	require.NoError(t, system.SetCatalogSettings(ctx, CatalogSettings{UpstreamURL: mirror.URL}))
+	svc.InvalidateAfterCommit(ctx)
+	fresh, err := svc.Snapshot(ctx, false)
+	require.NoError(t, err)
+	require.Equal(t, mirror.URL, fresh.upstreamURL)
+	finish()
+	held, err := svc.Snapshot(ctx, false)
+	require.NoError(t, err)
+	require.Equal(t, mirror.URL, held.upstreamURL)
+	require.JSONEq(t, `{"providers":{"new":{}}}`, string(held.Data))
+}

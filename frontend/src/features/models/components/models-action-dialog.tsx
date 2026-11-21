@@ -51,7 +51,7 @@ export function ModelsActionDialog() {
   const [developerSearchValue, setDeveloperSearchValue] = useState<string>('');
   const [modelIdInput, setModelIdInput] = useState<string>('');
   const [modelIdSearchValue, setModelIdSearchValue] = useState<string>('');
-  const [_selectedModelCard, setSelectedModelCard] = useState<ModelCard>({});
+  const [_selectedModelCard, setSelectedModelCard] = useState<CreateModelInput['modelCard']>({});
 
   // 用于解决 Dialog 内 Popover 无法滚动的问题
   const [dialogContent, setDialogContent] = useState<HTMLDivElement | null>(null);
@@ -131,7 +131,7 @@ export function ModelsActionDialog() {
 
   useEffect(() => {
     if (isEdit && currentRow) {
-      const modelCard = { ...currentRow.modelCard };
+      const modelCard: CreateModelInput['modelCard'] = { ...currentRow.modelCard };
       if (modelCard.cost && currentRow.missingReferencePrices?.length) {
         modelCard.cost = { ...modelCard.cost };
         for (const field of priceFields) {

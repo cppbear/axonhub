@@ -501,7 +501,12 @@ func (svc *ModelService) UpdateModelWithPriceEdits(ctx context.Context, id int, 
 		mut.Where(model.UpdatedAtEQ(*expected))
 	}
 	if input.ModelCard != nil {
-		original, err := svc.entFromContext(ctx).Model.Get(ctx, id)
+		if err := model.Policy.EvalMutation(ctx, mut.Mutation()); err != nil {
+			return nil, err
+		}
+		original, err := authz.RunAsHost(ctx, svc.entFromContext(ctx), "preserve-model-reference-prices", func(ctx context.Context) (*ent.Model, error) {
+			return ent.FromContext(ctx).Model.Get(ctx, id)
+		})
 		if err != nil {
 			return nil, err
 		}

@@ -330,9 +330,10 @@ input CatalogImportSelection {
   type: String!
   prices: [CatalogImportPriceInput!]!
 }
+enum CatalogImportStatus { applied invalid conflict catalogChanged }
 type CatalogImportOutcome {
   modelID: String!
-  status: String!
+  status: CatalogImportStatus!
 }
 input CatalogCheckSettingsInput {
   enabled: Boolean!
