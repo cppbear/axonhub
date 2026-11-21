@@ -8,6 +8,7 @@ package gql
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/contexts"
@@ -18,6 +19,11 @@ import (
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/samber/lo"
 )
+
+// MissingReferencePrices is the resolver for the missingReferencePrices field.
+func (r *modelResolver) MissingReferencePrices(ctx context.Context, obj *ent.Model) ([]string, error) {
+	return biz.MissingReferencePrices(obj.ModelCard), nil
+}
 
 // AssociatedChannelCount is the resolver for the associatedChannelCount field.
 func (r *modelResolver) AssociatedChannelCount(ctx context.Context, obj *ent.Model) (int, error) {
@@ -35,8 +41,8 @@ func (r *mutationResolver) BulkCreateModels(ctx context.Context, inputs []*ent.C
 }
 
 // UpdateModel is the resolver for the updateModel field.
-func (r *mutationResolver) UpdateModel(ctx context.Context, id objects.GUID, input ent.UpdateModelInput) (*ent.Model, error) {
-	return r.modelService.UpdateModel(ctx, id.ID, &input)
+func (r *mutationResolver) UpdateModel(ctx context.Context, id objects.GUID, input ent.UpdateModelInput, editedPrices []*biz.ManualPriceEdit, expectedUpdatedAt *time.Time) (*ent.Model, error) {
+	return r.modelService.UpdateModelWithPriceEdits(ctx, id.ID, &input, lo.FromSlicePtr(editedPrices), expectedUpdatedAt)
 }
 
 // DeleteModel is the resolver for the deleteModel field.
@@ -100,6 +106,31 @@ func (r *mutationResolver) BulkDeleteModels(ctx context.Context, ids []*objects.
 	}
 
 	return true, nil
+}
+
+// ApplyCatalogImport is the resolver for the applyCatalogImport field.
+func (r *mutationResolver) ApplyCatalogImport(ctx context.Context, scope biz.CatalogImportScope, revision string, selections []*biz.CatalogImportSelection) ([]*biz.CatalogImportOutcome, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteChannels)
+	}
+	results, err := r.modelService.ApplyCatalogImport(authz.WithScopeDecision(ctx, scopes.ScopeWriteChannels), scope, revision, lo.FromSlicePtr(selections))
+	return lo.ToSlicePtr(results), err
+}
+
+// SaveCatalogCheckSettings is the resolver for the saveCatalogCheckSettings field.
+func (r *mutationResolver) SaveCatalogCheckSettings(ctx context.Context, input biz.CatalogCheckSettings) (*biz.CatalogCheckStatus, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteSettings) {
+		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteSettings)
+	}
+	return r.modelService.SaveCatalogCheckSettings(ctx, input)
+}
+
+// CheckModelCatalogNow is the resolver for the checkModelCatalogNow field.
+func (r *mutationResolver) CheckModelCatalogNow(ctx context.Context) (*biz.CatalogCheckStatus, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteChannels)
+	}
+	return r.modelService.CheckModelCatalog(ctx)
 }
 
 // PreviewChannelModelEntries is the resolver for the previewChannelModelEntries field.
@@ -211,4 +242,20 @@ func (r *queryResolver) QueryModelChannelConnections(ctx context.Context, associ
 // QueryUnassociatedChannels is the resolver for the queryUnassociatedChannels field.
 func (r *queryResolver) QueryUnassociatedChannels(ctx context.Context) ([]*biz.UnassociatedChannel, error) {
 	return r.modelService.QueryUnassociatedChannels(ctx)
+}
+
+// CatalogImportPreview is the resolver for the catalogImportPreview field.
+func (r *queryResolver) CatalogImportPreview(ctx context.Context, scope biz.CatalogImportScope) (*biz.CatalogImportPreview, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteChannels)
+	}
+	return r.modelService.CatalogImportPreview(authz.WithScopeDecision(ctx, scopes.ScopeWriteChannels), scope)
+}
+
+// CatalogCheckStatus is the resolver for the catalogCheckStatus field.
+func (r *queryResolver) CatalogCheckStatus(ctx context.Context) (*biz.CatalogCheckStatus, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return nil, fmt.Errorf("permission denied: requires %s scope", scopes.ScopeWriteChannels)
+	}
+	return r.modelService.CatalogCheckStatus(ctx)
 }

@@ -190,7 +190,7 @@ func newSchemaFromDeps(deps Dependencies) graphql.ExecutableSchema {
 
 var (
 	skipTestChannelTransaction = entgql.SkipOperations("TestChannel", "TestChannelAPIKeys")
-	skipBulkImportTransaction  = entgql.SkipIfHasFields("bulkImportChannels")
+	skipBulkImportTransaction  = entgql.SkipIfHasFields("bulkImportChannels", "applyCatalogImport", "checkModelCatalogNow")
 	// checkProviderQuotas and resetChannelQuotaNow resolve into the quota
 	// service, whose channel writes go through its own client and would block
 	// on row locks the enclosing transaction holds. The reconciler uses its own

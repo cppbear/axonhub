@@ -39,19 +39,21 @@ var catalogExtraModelsJSON []byte
 
 // CatalogSnapshot is the catalog payload served to the admin UI.
 type CatalogSnapshot struct {
-	Data      objects.JSONRawMessage `json:"data"`
-	FetchedAt *time.Time             `json:"fetched_at,omitempty"`
-	Source    string                 `json:"source"`
-	Filtered  bool                   `json:"filtered"`
+	Data        objects.JSONRawMessage `json:"data"`
+	FetchedAt   *time.Time             `json:"fetched_at,omitempty"`
+	Source      string                 `json:"source"`
+	Filtered    bool                   `json:"filtered"`
+	upstreamURL string
 }
 
 // catalogPayload is a finished JSON payload. Only encoded bytes are retained:
 // the upstream catalog decoded into maps costs ~4x its JSON size and is all
 // pointers the GC has to scan.
 type catalogPayload struct {
-	data      []byte
-	fetchedAt time.Time
-	source    string
+	data        []byte
+	fetchedAt   time.Time
+	source      string
+	upstreamURL string
 }
 
 type heldCatalog struct {
@@ -115,12 +117,15 @@ func (s *CatalogService) ensure(ctx context.Context, filtered bool) (*catalogPay
 			return held, nil
 		}
 
-		data, source, err := s.load(ctx, filtered)
+		// The singleflight load outlives the first caller, including its settings read.
+		ctx := context.WithoutCancel(ctx)
+		upstreamURL := s.system.CatalogSettingsOrDefault(ctx).EffectiveUpstreamURL()
+		data, source, err := s.load(ctx, filtered, upstreamURL)
 		if err != nil {
 			return nil, err
 		}
 
-		return s.hold(filtered, data, source), nil
+		return s.hold(filtered, data, source, upstreamURL), nil
 	})
 	if err != nil {
 		return nil, err
@@ -137,16 +142,11 @@ func (s *CatalogService) ensure(ctx context.Context, filtered bool) (*catalogPay
 // load fetches the upstream catalog and falls back to the bundled one when the
 // fetch or filtering fails. The fallback is held for the same TTL so an
 // unreachable upstream is not retried on every request.
-func (s *CatalogService) load(ctx context.Context, filtered bool) ([]byte, string, error) {
-	// Callers share this load through singleflight, so one caller going away
-	// must not turn the shared result into a held fallback.
-	ctx = context.WithoutCancel(ctx)
-	settings := s.system.CatalogSettingsOrDefault(ctx)
-
+func (s *CatalogService) load(ctx context.Context, filtered bool, upstreamURL string) ([]byte, string, error) {
 	fetchCtx, cancel := context.WithTimeout(ctx, catalogFetchTimeout)
 	defer cancel()
 
-	body, err := s.fetchUpstream(fetchCtx, settings.EffectiveUpstreamURL())
+	body, err := s.fetchUpstream(fetchCtx, upstreamURL)
 	if err == nil {
 		if !filtered {
 			return body, catalogSourceUpstream, nil
@@ -253,10 +253,11 @@ func snapshotFromPayload(payload *catalogPayload, filtered bool) CatalogSnapshot
 	}
 
 	return CatalogSnapshot{
-		Data:      objects.JSONRawMessage(payload.data),
-		FetchedAt: &fetchedAt,
-		Source:    source,
-		Filtered:  filtered,
+		Data:        objects.JSONRawMessage(payload.data),
+		FetchedAt:   &fetchedAt,
+		Source:      source,
+		Filtered:    filtered,
+		upstreamURL: payload.upstreamURL,
 	}
 }
 
@@ -276,11 +277,12 @@ func (s *CatalogService) held(filtered bool) *catalogPayload {
 }
 
 // hold keeps the payload for holdTTL, then releases it.
-func (s *CatalogService) hold(filtered bool, data []byte, source string) *catalogPayload {
+func (s *CatalogService) hold(filtered bool, data []byte, source, upstreamURL string) *catalogPayload {
 	payload := &catalogPayload{
-		data:      data,
-		fetchedAt: time.Now().UTC(),
-		source:    source,
+		data:        data,
+		fetchedAt:   time.Now().UTC(),
+		source:      source,
+		upstreamURL: upstreamURL,
 	}
 
 	s.mu.Lock()

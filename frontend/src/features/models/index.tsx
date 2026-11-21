@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { SortingState } from '@tanstack/react-table';
-import { IconPlus, IconSettings, IconAlertCircle } from '@tabler/icons-react';
+import { IconPlus, IconDownload, IconSettings, IconAlertCircle } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { useDebounce } from '@/hooks/use-debounce';
 import { usePermissions } from '@/hooks/usePermissions';
@@ -16,6 +16,7 @@ import { ModelsOnboardingFlow } from './components/models-onboarding-flow';
 import { ModelsTable } from './components/models-table';
 import ModelsProvider, { useModels } from './context/models-context';
 import { useQueryAllModels } from './data/models';
+import { useCatalogCheckStatus } from './data/catalog-import';
 import { ModelsCatalogStatus } from './components/models-catalog-status';
 import { useDevelopersData } from './data/providers';
 
@@ -105,6 +106,21 @@ function BulkAddButton() {
   );
 }
 
+function CatalogImportButton() {
+  const { t } = useTranslation();
+  const { setOpen } = useModels();
+  const { data } = useCatalogCheckStatus();
+  return (
+    <Button variant='outline' className='shrink-0' onClick={() => setOpen('catalogImport')} data-testid='catalog-import-open'>
+      <IconDownload className='mr-2 h-4 w-4' />
+      {t('models.import.title')}
+      {data?.lastSuccess && data.available + data.changed > 0 && (
+        <span className='rounded-full bg-muted px-2 text-xs' title={t('models.import.lastCounts', { available: data.available, changed: data.changed })}>{data.available + data.changed}</span>
+      )}
+    </Button>
+  );
+}
+
 function SettingsButton() {
   const { t } = useTranslation();
   const { setOpen } = useModels();
@@ -137,6 +153,7 @@ function ActionButtons() {
         <>
           <DetectUnassociatedButton />
           <SettingsButton />
+          <PermissionGuard requiredSystemScope='write_channels'><CatalogImportButton /></PermissionGuard>
           <BulkAddButton />
           <CreateButton />
         </>

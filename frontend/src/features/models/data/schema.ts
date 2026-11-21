@@ -20,8 +20,8 @@ export const modelModalitiesSchema = z.object({
 export type ModelModalities = z.infer<typeof modelModalitiesSchema>;
 
 export const modelCostSchema = z.object({
-  input: z.number(),
-  output: z.number(),
+  input: z.number().optional(),
+  output: z.number().optional(),
   cacheRead: z.number().optional(),
   cacheWrite: z.number().optional(),
 });
@@ -149,6 +149,8 @@ export const modelSchema = z.object({
   id: z.string(),
   createdAt: z.coerce.date(),
   updatedAt: z.coerce.date(),
+  editVersion: z.string().optional(),
+  missingReferencePrices: z.array(z.string()).optional(),
   developer: z.string(),
   modelID: z.string(),
   type: modelTypeSchema,

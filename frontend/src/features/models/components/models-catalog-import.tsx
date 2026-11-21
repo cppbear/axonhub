@@ -1,0 +1,386 @@
+// 职责: 预览渠道或服务商的目录差异并批量提交勾选的模型和参考价。
+// 关联文件:
+//   frontend/src/features/models/data/catalog-import.ts
+//   frontend/src/features/models/components/models-dialogs.tsx
+//   frontend/src/features/models/components/models-catalog-schedule.tsx
+//   frontend/src/locales/en.json
+//   frontend/src/locales/zh.json
+// 注意事项:
+//   只有主动选择阶梯才将其保存为固定单价，手工价格默认保留。
+import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useDebounce } from '@/hooks/use-debounce';
+import { usePermissions } from '@/hooks/usePermissions';
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { useModels } from '../context/models-context';
+import {
+  useCatalogPreview,
+  useCatalogApply,
+  useCatalogCheckStatus,
+  type ImportScope,
+  type ImportRow,
+  type ImportSelection,
+  type CatalogPreview,
+  type Outcome,
+} from '../data/catalog-import';
+import { PriceEditor, defaultSelection, selectStyle, offerKey, useReferencePriceFormat } from './models-catalog-prices';
+import { CatalogSchedule } from './models-catalog-schedule';
+
+const pageSize = 25;
+const suffix = (id: string) => id.slice(id.indexOf('/') + 1);
+
+function PreviewRows({
+  preview,
+  scope,
+  onApplied,
+}: {
+  preview: CatalogPreview;
+  scope: ImportScope;
+  onApplied: (outcomes: Outcome[]) => void;
+}) {
+  const { t } = useTranslation();
+  const formatPrice = useReferencePriceFormat();
+  const apply = useCatalogApply();
+  const [search, setSearch] = useState('');
+  const query = useDebounce(search, 200);
+  const [filter, setFilter] = useState('all');
+  const [page, setPage] = useState(0);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [edits, setEdits] = useState<Record<string, ImportSelection>>({});
+  const [merged, setMerged] = useState<ImportRow[]>([]);
+  const [expanded, setExpanded] = useState('');
+  const [error, setError] = useState('');
+  const rows = useMemo(() => {
+    const mergedIDs = new Set(merged.flatMap((r) => r.aliases));
+    return [...merged, ...preview.rows.filter((r) => !r.aliases.some((id) => mergedIDs.has(id)))];
+  }, [merged, preview.rows]);
+  const draftFor = (row: ImportRow) => edits[row.modelID] ?? defaultSelection(row);
+  const filtered = rows.filter(
+    (r) =>
+      (!query || [r.modelID, r.name, ...r.aliases].some((id) => id.toLowerCase().includes(query.toLowerCase()))) &&
+      (filter === 'all' ||
+        (filter === 'new' && !r.version) ||
+        (filter === 'changed' && r.changed) ||
+        (filter === 'unmatched' && !r.offers.length))
+  );
+  const getEligible = (row: ImportRow) => !row.archived && !(preview.source === 'fallback' && row.version);
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const chosen = rows.filter((r) => selected.has(r.modelID));
+  const choices = chosen.map(draftFor);
+  const ready = choices.length > 0 && choices.every((r) => r.name.trim() && r.developer.trim() && (!r.version || r.prices.length > 0));
+  const canonicalSuffix = chosen.length ? suffix(chosen[0].modelID) : '';
+  const canMerge =
+    scope.ignorePrefix &&
+    chosen.length > 1 &&
+    chosen.every((r) => !r.version && suffix(r.modelID) === canonicalSuffix) &&
+    !rows.some((r) => r.modelID === canonicalSuffix && !selected.has(r.modelID));
+  const merge = () => {
+    const offers = [...new Map(chosen.flatMap((r) => r.offers).map((o) => [offerKey(o), o])).values()];
+    const group: ImportRow = {
+      ...chosen[0],
+      mergedVersions: chosen.flatMap((r) => r.mergedVersions ?? [r.quoteVersion]).sort(),
+      modelID: canonicalSuffix,
+      name: canonicalSuffix,
+      developer: '',
+      offers,
+      preferred: null,
+      aliases: [...new Set(chosen.flatMap((r) => r.aliases))],
+    };
+    setMerged((prev) => [...prev.filter((r) => !selected.has(r.modelID)), group]);
+    setEdits((prev) => ({ ...prev, [canonicalSuffix]: defaultSelection(group) }));
+    setSelected(new Set([canonicalSuffix]));
+    setExpanded(canonicalSuffix);
+    setPage(0);
+  };
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(filtered.length / pageSize) - 1));
+  const visible = filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+  const applySelected = async () => {
+    setError('');
+    try {
+      const results = await apply.mutateAsync({ scope, revision: preview.revision, selections: choices });
+      onApplied(results);
+      setSelected(new Set());
+      setEdits({});
+      setMerged([]);
+      setExpanded('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <div className='flex min-h-0 flex-1 flex-col gap-2'>
+      <div className='flex flex-wrap gap-2'>
+        <Input
+          className='min-w-32 flex-1'
+          placeholder={t('models.import.search')}
+          aria-label={t('models.import.search')}
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(0);
+          }}
+        />
+        <select
+          className={selectStyle}
+          value={filter}
+          aria-label={t('models.import.filterLabel')}
+          onChange={(e) => {
+            setFilter(e.target.value);
+            setPage(0);
+          }}
+        >
+          {['all', 'new', 'changed', 'unmatched'].map((f) => (
+            <option key={f} value={f}>
+              {t('models.import.filter.' + f)}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className='flex flex-wrap items-center gap-2 text-sm'>
+        <Button
+          variant='outline'
+          size='sm'
+          onClick={() =>
+            setSelected(
+              (prev) =>
+                new Set([
+                  ...prev,
+                  ...filtered.filter((r) => getEligible(r) && (!r.version || draftFor(r).prices.length > 0)).map((r) => r.modelID),
+                ])
+            )
+          }
+        >
+          {t('models.import.selectAll')}
+        </Button>
+        {selected.size > 0 && (
+          <Button variant='ghost' size='sm' onClick={() => setSelected(new Set())}>
+            {t('models.import.clearSelection')}
+          </Button>
+        )}
+        {canMerge && (
+          <Button variant='outline' size='sm' onClick={merge}>
+            {t('models.import.merge', { id: canonicalSuffix })}
+          </Button>
+        )}
+        <span className='text-muted-foreground'>{t('models.import.rowCount', { count: filtered.length })}</span>
+      </div>
+      <div className='min-h-24 flex-1 overflow-y-auto rounded-md border' data-testid='catalog-import-rows'>
+        {!visible.length && <p className='text-muted-foreground p-4 text-sm'>{t('models.import.empty')}</p>}
+        {visible.map((row) => {
+          const draft = draftFor(row);
+          let status = !row.version ? 'new' : row.changed ? 'changed' : 'existing';
+          if (row.archived) status = 'archived';
+          else if (!row.offers.length) status = 'unmatched';
+          else if (!row.preferred && !draft.provider) status = 'chooseSource';
+          const priceSummary = draft.prices
+            .map((a) => {
+              const quote = row.offers
+                .find((o) => o.provider === a.provider && o.modelID === a.modelID)
+                ?.rates.find((r) => r.field === a.field);
+              const next = a.action === 'TIER' ? quote?.tiers.find((v) => v.label === a.tier)?.value : quote?.base;
+              const current = row.prices.find((r) => r.field === a.field)?.value;
+              return a.action === 'FIX'
+                ? t('models.import.fixCurrent')
+                : `${t('models.modelCard.' + a.field)} ${current == null ? '' : formatPrice(current) + ' → '}${next == null ? '—' : formatPrice(next)}`;
+            })
+            .join(' · ');
+          return (
+            <div key={row.modelID} className='space-y-1 border-b p-2 last:border-b-0'>
+              <div className='flex items-center gap-3'>
+                <Checkbox
+                  aria-label={row.modelID}
+                  checked={selected.has(row.modelID)}
+                  disabled={!getEligible(row)}
+                  onCheckedChange={() => toggle(row.modelID)}
+                />
+                <button
+                  type='button'
+                  aria-expanded={expanded === row.modelID}
+                  className='min-w-0 flex-1 text-left'
+                  onClick={() => setExpanded(expanded === row.modelID ? '' : row.modelID)}
+                >
+                  <span className='block text-sm font-medium break-all'>{row.modelID}</span>
+                  <span className='text-muted-foreground block text-xs'>
+                    {t('models.import.filter.' + status)}
+                    {draft.provider ? ' · ' + draft.provider : ''}
+                    {priceSummary ? ' · ' + priceSummary : !row.version && draft.provider ? ' · ' + t('models.import.noPrices') : ''}
+                  </span>
+                </button>
+              </div>
+              {expanded === row.modelID && (
+                <PriceEditor row={row} draft={draft} onChange={(value) => setEdits((prev) => ({ ...prev, [row.modelID]: value }))} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className='flex flex-wrap items-center justify-between gap-2'>
+        <div className='flex items-center gap-2 text-xs'>
+          <Button
+            size='sm'
+            variant='outline'
+            aria-label={t('pagination.previousPage')}
+            disabled={!currentPage}
+            onClick={() => setPage(currentPage - 1)}
+          >
+            ‹
+          </Button>
+          {currentPage + 1} / {Math.max(1, Math.ceil(filtered.length / pageSize))}
+          <Button
+            size='sm'
+            variant='outline'
+            aria-label={t('pagination.nextPage')}
+            disabled={(currentPage + 1) * pageSize >= filtered.length}
+            onClick={() => setPage(currentPage + 1)}
+          >
+            ›
+          </Button>
+        </div>
+        <Button data-testid='catalog-import-apply' disabled={!ready || apply.isPending} onClick={applySelected}>
+          {t('models.import.apply', { count: selected.size })}
+        </Button>
+      </div>
+      {selected.size > 0 && !ready && (
+        <p role='status' className='text-muted-foreground text-xs'>
+          {t('models.import.completeRows')}
+        </p>
+      )}
+      {error && (
+        <p role='alert' className='text-destructive text-sm'>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function ModelsCatalogImport() {
+  const { t } = useTranslation();
+  const { setOpen } = useModels();
+  const { hasSystemScope } = usePermissions();
+  const status = useCatalogCheckStatus();
+  const [mode, setMode] = useState('channels');
+  const [provider, setProvider] = useState('');
+  const [ignorePrefix, setIgnorePrefix] = useState(false);
+  const [outcomes, setOutcomes] = useState<Outcome[]>([]);
+  const schedule = status.data?.settings;
+  const scope = useMemo<ImportScope>(
+    () => ({
+      channels: mode !== 'provider',
+      providers: mode === 'provider' ? (provider ? [provider] : []) : mode === 'watch' ? (schedule?.providers ?? []) : [],
+      ignorePrefix: mode === 'watch' ? (schedule?.ignorePrefix ?? false) : mode === 'channels' && ignorePrefix,
+      tracked: mode === 'watch',
+    }),
+    [mode, provider, ignorePrefix, schedule]
+  );
+  const preview = useCatalogPreview(scope);
+  const [isSchedule, setIsSchedule] = useState(false);
+  const data = preview.data;
+  return (
+    <Dialog
+      open
+      onOpenChange={(v) => {
+        if (!v) setOpen(null);
+      }}
+    >
+      <DialogContent className='flex h-[min(85dvh,52rem)] max-h-[95dvh] flex-col overflow-hidden sm:max-w-4xl'>
+        <DialogHeader>
+          <DialogTitle>{t('models.import.title')}</DialogTitle>
+          <DialogDescription>{t('models.import.description')}</DialogDescription>
+        </DialogHeader>
+        <div className='flex flex-wrap items-center gap-2'>
+          {!isSchedule && (
+            <select
+              aria-label={t('models.import.scopeLabel')}
+              className={selectStyle}
+              value={mode}
+              onChange={(e) => {
+                setMode(e.target.value);
+                setOutcomes([]);
+              }}
+            >
+              {['channels', 'provider', 'watch'].map((m) => (
+                <option key={m} value={m}>
+                  {t('models.import.scope.' + m)}
+                </option>
+              ))}
+            </select>
+          )}
+          {!isSchedule && mode === 'provider' && (
+            <select
+              aria-label={t('models.import.provider')}
+              className={selectStyle}
+              value={provider}
+              onChange={(e) => {
+                setProvider(e.target.value);
+                setOutcomes([]);
+              }}
+            >
+              <option value=''>{t('models.import.pickProvider')}</option>
+              {(data?.providers ?? (provider ? [provider] : [])).map((p) => (
+                <option key={p}>{p}</option>
+              ))}
+            </select>
+          )}
+          {!isSchedule && mode === 'channels' && (
+            <label className='flex items-center gap-2 text-sm'>
+              <Checkbox checked={ignorePrefix} onCheckedChange={(v) => setIgnorePrefix(v === true)} />
+              {t('models.import.ignorePrefix')}
+            </label>
+          )}
+          <Button size='sm' variant='outline' className='ms-auto' onClick={() => setIsSchedule(!isSchedule)}>
+            {t(isSchedule ? 'models.import.preview' : 'models.import.schedule')}
+          </Button>
+        </div>
+        {isSchedule && status.data && (
+          <CatalogSchedule
+            key={JSON.stringify(status.data.settings)}
+            status={status.data}
+            providers={data?.providers ?? []}
+            canWrite={hasSystemScope('write_settings')}
+            onReview={() => {
+              setMode('watch');
+              setIsSchedule(false);
+            }}
+          />
+        )}
+        {isSchedule && status.error && <p role='alert'>{status.error.message}</p>}
+        {!isSchedule && (
+          <>
+            {outcomes.length > 0 && (
+              <div role='status' className='max-h-24 overflow-y-auto text-sm'>
+                {t('models.import.applied', { count: outcomes.filter((r) => r.status === 'applied').length })}
+                {outcomes
+                  .filter((r) => r.status !== 'applied')
+                  .map((r, i) => (
+                    <p key={i}>
+                      {r.modelID} · {t('models.import.result.' + r.status)}
+                    </p>
+                  ))}
+              </div>
+            )}
+            {preview.isPending && <p>{t('common.loading')}</p>}
+            {preview.error && <p role='alert'>{preview.error.message}</p>}
+            {data && (
+              <>
+                <p className='text-muted-foreground text-xs break-all'>
+                  {t('models.import.' + (data.source === 'fallback' ? 'fallback' : 'source'))} · {data.upstreamURL}
+                </p>
+                <PreviewRows key={JSON.stringify(scope) + data.revision} preview={data} scope={scope} onApplied={setOutcomes} />
+              </>
+            )}
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}

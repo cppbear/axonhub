@@ -1,3 +1,4 @@
+import { priceFields } from '../data/catalog-import';
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { format } from 'date-fns';
 import { useForm } from 'react-hook-form';
@@ -130,6 +131,13 @@ export function ModelsActionDialog() {
 
   useEffect(() => {
     if (isEdit && currentRow) {
+      const modelCard = { ...currentRow.modelCard };
+      if (modelCard.cost && currentRow.missingReferencePrices?.length) {
+        modelCard.cost = { ...modelCard.cost };
+        for (const field of priceFields) {
+          if (currentRow.missingReferencePrices.includes(field)) delete modelCard.cost[field];
+        }
+      }
       form.reset({
         developer: currentRow.developer,
         modelID: currentRow.modelID,
@@ -137,7 +145,7 @@ export function ModelsActionDialog() {
         name: currentRow.name,
         icon: currentRow.icon,
         group: currentRow.group,
-        modelCard: currentRow.modelCard,
+        modelCard,
         settings: {
           ...currentRow.settings,
           associations: currentRow.settings?.associations ?? [],
@@ -274,7 +282,11 @@ export function ModelsActionDialog() {
           settings: data.settings,
           remark: data.remark,
         };
-        await updateModel.mutateAsync({ id: currentRow.id, input: updateData });
+        const editedPrices = priceFields.filter((field) => {
+          const original = currentRow.missingReferencePrices?.includes(field) ? undefined : currentRow.modelCard.cost?.[field];
+          return data.modelCard.cost?.[field] !== original;
+        }).map((field) => ({ field, missing: data.modelCard.cost?.[field] == null }));
+        await updateModel.mutateAsync({ id: currentRow.id, input: updateData, editedPrices, expectedUpdatedAt: currentRow.editVersion });
       } else {
         await createModel.mutateAsync(data);
       }
@@ -651,11 +663,11 @@ export function ModelsActionDialog() {
                             <FormControl>
                               <Input
                                 type='number'
-                                step='0.01'
+                                step='any'
                                 {...field}
                                 value={field.value ?? ''}
                                 onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : undefined)}
-                                placeholder='0'
+                                placeholder='—'
                               />
                             </FormControl>
                             <FormMessage />
@@ -671,11 +683,11 @@ export function ModelsActionDialog() {
                             <FormControl>
                               <Input
                                 type='number'
-                                step='0.01'
+                                step='any'
                                 {...field}
                                 value={field.value ?? ''}
                                 onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : undefined)}
-                                placeholder='0'
+                                placeholder='—'
                               />
                             </FormControl>
                             <FormMessage />
@@ -691,11 +703,11 @@ export function ModelsActionDialog() {
                             <FormControl>
                               <Input
                                 type='number'
-                                step='0.01'
+                                step='any'
                                 {...field}
                                 value={field.value ?? ''}
                                 onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : undefined)}
-                                placeholder='0'
+                                placeholder='—'
                               />
                             </FormControl>
                             <FormMessage />
@@ -711,11 +723,11 @@ export function ModelsActionDialog() {
                             <FormControl>
                               <Input
                                 type='number'
-                                step='0.01'
+                                step='any'
                                 {...field}
                                 value={field.value ?? ''}
                                 onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : undefined)}
-                                placeholder='0'
+                                placeholder='—'
                               />
                             </FormControl>
                             <FormMessage />

@@ -20,6 +20,8 @@ const MODELS_QUERY = `
           id
           createdAt
           updatedAt
+          editVersion: updatedAt
+          missingReferencePrices
           developer
           modelID
           icon
@@ -142,6 +144,8 @@ const CREATE_MODEL_MUTATION = `
       id
       createdAt
       updatedAt
+      editVersion: updatedAt
+      missingReferencePrices
       developer
       modelID
       icon
@@ -246,6 +250,8 @@ const BULK_CREATE_MODELS_MUTATION = `
       id
       createdAt
       updatedAt
+      editVersion: updatedAt
+      missingReferencePrices
       developer
       modelID
       icon
@@ -345,11 +351,13 @@ const BULK_CREATE_MODELS_MUTATION = `
 `;
 
 const UPDATE_MODEL_MUTATION = `
-  mutation UpdateModel($id: ID!, $input: UpdateModelInput!) {
-    updateModel(id: $id, input: $input) {
+  mutation UpdateModel($id: ID!, $input: UpdateModelInput!, $editedPrices: [ManualPriceEdit!], $expectedUpdatedAt: Time) {
+    updateModel(id: $id, input: $input, editedPrices: $editedPrices, expectedUpdatedAt: $expectedUpdatedAt) {
       id
       createdAt
       updatedAt
+      editVersion: updatedAt
+      missingReferencePrices
       developer
       modelID
       icon
@@ -567,8 +575,8 @@ export function useUpdateModel() {
   const { handleError } = useErrorHandler();
 
   return useMutation({
-    mutationFn: async ({ id, input }: { id: string; input: UpdateModelInput }) => {
-      const data = await graphqlRequest<{ updateModel: Model }>(UPDATE_MODEL_MUTATION, { id, input });
+    mutationFn: async (variables: { id: string; input: UpdateModelInput; editedPrices?: { field: string; missing: boolean }[]; expectedUpdatedAt?: string }) => {
+      const data = await graphqlRequest<{ updateModel: Model }>(UPDATE_MODEL_MUTATION, variables);
       return modelSchema.parse(data.updateModel);
     },
     onSuccess: () => {

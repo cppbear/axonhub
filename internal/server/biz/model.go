@@ -1,6 +1,7 @@
 // 职责: 管理模型配置，并通过共享 Model 索引缓存提供模型路由读取。
 // 关联文件:
 //
+//	internal/server/biz/model_catalog_apply.go
 //	internal/server/biz/model_cache.go
 //	internal/server/biz/channel.go
 //	internal/server/orchestrator/candidates.go
@@ -38,6 +39,7 @@ import (
 type ModelServiceParams struct {
 	fx.In
 
+	Catalog    *CatalogService
 	ModelCache *ModelCacheService
 
 	ChannelService *ChannelService
@@ -47,6 +49,7 @@ type ModelServiceParams struct {
 
 func NewModelService(params ModelServiceParams) *ModelService {
 	return &ModelService{
+		catalog:    params.Catalog,
 		modelCache: params.ModelCache,
 		AbstractService: &AbstractService{
 			db: params.Ent,
@@ -59,6 +62,7 @@ func NewModelService(params ModelServiceParams) *ModelService {
 type ModelService struct {
 	*AbstractService
 
+	catalog    *CatalogService
 	modelCache *ModelCacheService
 
 	channelService *ChannelService
@@ -473,6 +477,10 @@ func (svc *ModelService) BulkCreateModels(ctx context.Context, inputs []*ent.Cre
 
 // UpdateModel updates an existing model with the provided input.
 func (svc *ModelService) UpdateModel(ctx context.Context, id int, input *ent.UpdateModelInput) (*ent.Model, error) {
+	return svc.UpdateModelWithPriceEdits(ctx, id, input, nil, nil)
+}
+
+func (svc *ModelService) UpdateModelWithPriceEdits(ctx context.Context, id int, input *ent.UpdateModelInput, edited []ManualPriceEdit, expected *time.Time) (*ent.Model, error) {
 	// Validate regex patterns in settings if provided
 	if input.Settings != nil {
 		if err := svc.validateModelSettings(input.Settings); err != nil {
@@ -489,7 +497,16 @@ func (svc *ModelService) UpdateModel(ctx context.Context, id int, input *ent.Upd
 		SetNillableStatus(input.Status).
 		SetNillableIcon(input.Icon)
 
+	if expected != nil {
+		mut.Where(model.UpdatedAtEQ(*expected))
+	}
 	if input.ModelCard != nil {
+		original, err := svc.entFromContext(ctx).Model.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		preserveCatalogPrices(original.ModelCard, input.ModelCard, edited)
+		mut.Where(model.UpdatedAtEQ(original.UpdatedAt))
 		mut.SetModelCard(input.ModelCard)
 	}
 

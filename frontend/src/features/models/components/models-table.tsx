@@ -462,19 +462,19 @@ export function ModelsTable({
                                         <div className='space-y-2 text-sm'>
                                           <div className='flex justify-between'>
                                             <span className='text-muted-foreground'>{t('models.modelCard.input')}:</span>
-                                            <span className='font-mono text-xs'>{modelCard?.cost?.input ?? '-'}</span>
+                                            <span className='font-mono text-xs'>{model.missingReferencePrices?.includes('input') ? '—' : modelCard?.cost?.input ?? '-'}</span>
                                           </div>
                                           <div className='flex justify-between'>
                                             <span className='text-muted-foreground'>{t('models.modelCard.output')}:</span>
-                                            <span className='font-mono text-xs'>{modelCard?.cost?.output ?? '-'}</span>
+                                            <span className='font-mono text-xs'>{model.missingReferencePrices?.includes('output') ? '—' : modelCard?.cost?.output ?? '-'}</span>
                                           </div>
-                                          {modelCard?.cost?.cacheRead !== undefined && (
+                                          {!model.missingReferencePrices?.includes('cacheRead') && modelCard?.cost?.cacheRead !== undefined && (
                                             <div className='flex justify-between'>
                                               <span className='text-muted-foreground'>{t('models.modelCard.cacheRead')}:</span>
                                               <span className='font-mono text-xs'>{modelCard.cost.cacheRead}</span>
                                             </div>
                                           )}
-                                          {modelCard?.cost?.cacheWrite !== undefined && (
+                                          {!model.missingReferencePrices?.includes('cacheWrite') && modelCard?.cost?.cacheWrite !== undefined && (
                                             <div className='flex justify-between'>
                                               <span className='text-muted-foreground'>{t('models.modelCard.cacheWrite')}:</span>
                                               <span className='font-mono text-xs'>{modelCard.cost.cacheWrite}</span>

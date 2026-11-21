@@ -218,6 +218,7 @@ type UnassociatedChannel {
 }
 
 extend type Model {
+  missingReferencePrices: [String!]! @goField(forceResolver: true)
   associatedChannelCount: Int! @goField(forceResolver: true)
 }
 
@@ -237,11 +238,131 @@ extend type Query {
 extend type Mutation {
   createModel(input: CreateModelInput!): Model!
   bulkCreateModels(inputs: [CreateModelInput!]!): [Model!]!
-  updateModel(id: ID!, input: UpdateModelInput!): Model!
+  updateModel(id: ID!, input: UpdateModelInput!, editedPrices: [ManualPriceEdit!], expectedUpdatedAt: Time): Model!
   deleteModel(id: ID!): Boolean!
   updateModelStatus(id: ID!, status: ModelStatus!): Boolean!
   bulkArchiveModels(ids: [ID!]!): Boolean!
   bulkDisableModels(ids: [ID!]!): Boolean!
   bulkEnableModels(ids: [ID!]!): Boolean!
   bulkDeleteModels(ids: [ID!]!): Boolean!
+}
+
+input ManualPriceEdit {
+  field: String!
+  missing: Boolean!
+}
+
+input CatalogImportScope {
+  channels: Boolean!
+  providers: [String!]!
+  ignorePrefix: Boolean!
+  tracked: Boolean!
+}
+
+type CatalogImportTier {
+  label: String!
+  value: Float!
+}
+
+type CatalogImportRate {
+  field: String!
+  base: Float
+  tiers: [CatalogImportTier!]!
+}
+
+type CatalogImportOffer {
+  provider: String!
+  modelID: String!
+  name: String!
+  developer: String!
+  type: String!
+  canonical: String!
+  rates: [CatalogImportRate!]!
+}
+
+type CatalogImportLocalPrice {
+  field: String!
+  value: Float
+  follow: Boolean!
+  provider: String!
+  modelID: String!
+}
+
+type CatalogImportRow {
+  modelID: String!
+  name: String!
+  developer: String!
+  aliases: [String!]!
+  version: String!
+  quoteVersion: String!
+  archived: Boolean!
+  changed: Boolean!
+  offers: [CatalogImportOffer!]!
+  preferred: CatalogImportOffer
+  prices: [CatalogImportLocalPrice!]!
+}
+
+type CatalogImportPreview {
+  source: String!
+  upstreamURL: String!
+  revision: String!
+  providers: [String!]!
+  rows: [CatalogImportRow!]!
+}
+
+enum CatalogPriceAction { FOLLOW FIX FIX_BASE TIER }
+input CatalogImportPriceInput {
+  field: String!
+  action: CatalogPriceAction!
+  provider: String!
+  modelID: String!
+  tier: String
+}
+input CatalogImportSelection {
+  modelID: String!
+  aliases: [String!]!
+  version: String!
+  quoteVersions: [String!]!
+  name: String!
+  developer: String!
+  provider: String!
+  sourceModelID: String!
+  type: String!
+  prices: [CatalogImportPriceInput!]!
+}
+type CatalogImportOutcome {
+  modelID: String!
+  status: String!
+}
+input CatalogCheckSettingsInput {
+  enabled: Boolean!
+  time: String!
+  timezone: String!
+  providers: [String!]!
+  ignorePrefix: Boolean!
+}
+type CatalogCheckSettings {
+  enabled: Boolean!
+  time: String!
+  timezone: String!
+  providers: [String!]!
+  ignorePrefix: Boolean!
+}
+type CatalogCheckStatus {
+  settings: CatalogCheckSettings!
+  nextCheck: Time
+  lastAttempt: Time
+  lastSuccess: Time
+  failed: Boolean!
+  available: Int!
+  changed: Int!
+}
+extend type Query {
+  catalogImportPreview(scope: CatalogImportScope!): CatalogImportPreview!
+  catalogCheckStatus: CatalogCheckStatus!
+}
+extend type Mutation {
+  applyCatalogImport(scope: CatalogImportScope!, revision: String!, selections: [CatalogImportSelection!]!): [CatalogImportOutcome!]!
+  saveCatalogCheckSettings(input: CatalogCheckSettingsInput!): CatalogCheckStatus!
+  checkModelCatalogNow: CatalogCheckStatus!
 }
