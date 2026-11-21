@@ -13,6 +13,7 @@ package biz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -39,8 +40,12 @@ type CatalogCheckSettings struct {
 }
 
 type CatalogCheckStatus struct {
-	Settings           CatalogCheckSettings
-	NextCheck          *time.Time
+	Settings  CatalogCheckSettings
+	NextCheck *time.Time
+	catalogCheckResult
+}
+
+type catalogCheckResult struct {
 	LastAttempt        *time.Time
 	LastSuccess        *time.Time
 	Failed             bool
@@ -68,7 +73,12 @@ func (s CatalogCheckSettings) next(now time.Time) (time.Time, error) {
 }
 
 func (svc *ModelService) CatalogCheckStatus(ctx context.Context) (*CatalogCheckStatus, error) {
-	state, _, err := svc.readCatalogCheck(ctx)
+	var state *CatalogCheckStatus
+	err := svc.RunInTransaction(ctx, func(ctx context.Context) error {
+		var err error
+		state, _, err = svc.readCatalogCheck(ctx)
+		return err
+	})
 	return state, err
 }
 
@@ -85,7 +95,7 @@ func (svc *ModelService) readCatalogCheck(ctx context.Context) (*CatalogCheckSta
 	state := &CatalogCheckStatus{}
 	value, err = svc.systemService.getSystemValue(ctx, catalogCheckResultKey)
 	if err == nil {
-		if err = json.Unmarshal([]byte(value), state); err != nil {
+		if err = json.Unmarshal([]byte(value), &state.catalogCheckResult); err != nil {
 			return nil, "", err
 		}
 	} else if !ent.IsNotFound(err) {
@@ -93,7 +103,6 @@ func (svc *ModelService) readCatalogCheck(ctx context.Context) (*CatalogCheckSta
 	}
 	// The counts and timestamps describe the last completed check, including after scope changes.
 	state.Settings = settings
-	state.NextCheck = nil
 	if settings.Enabled {
 		next, err := settings.next(time.Now())
 		if err != nil {
@@ -120,32 +129,70 @@ func (svc *ModelService) SaveCatalogCheckSettings(ctx context.Context, settings 
 	return svc.CatalogCheckStatus(ctx)
 }
 
-// compareCheckResult gives one replica the daily check and prevents an older
-// check finishing later from replacing the result of a newer manual check.
-func (svc *ModelService) compareCheckResult(ctx context.Context, old string, state *CatalogCheckStatus) (string, bool, error) {
+var errCheckClaimChanged = errors.New("another model catalog check is in progress")
+
+// Compare the persisted result to the one read inside the claim transaction.
+// A late completion cannot overwrite a newer manual check.
+func (svc *ModelService) saveCheckResult(ctx context.Context, previous string, state catalogCheckResult) (string, error) {
 	data, err := json.Marshal(state)
 	if err != nil {
-		return "", false, err
+		return "", err
 	}
 	value := string(data)
 	db := svc.entFromContext(ctx)
-	if old == "" {
+	if previous == "" {
 		err = db.System.Create().SetKey(catalogCheckResultKey).SetValue(value).Exec(ctx)
 		if ent.IsConstraintError(err) {
-			return "", false, nil
+			return "", errCheckClaimChanged
 		}
 	} else {
 		var count int
-		count, err = db.System.Update().Where(system.KeyEQ(catalogCheckResultKey), system.ValueEQ(old)).SetValue(value).Save(ctx)
+		count, err = db.System.Update().Where(system.KeyEQ(catalogCheckResultKey), system.ValueEQ(previous)).SetValue(value).Save(ctx)
 		if err == nil && count == 0 {
-			return "", false, nil
+			return "", errCheckClaimChanged
 		}
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("save catalog check result: %w", err)
+		return "", fmt.Errorf("save catalog check result: %w", err)
 	}
-	svc.systemService.invalidateSystemValueCache(ctx, catalogCheckResultKey)
-	return value, true, nil
+	return value, nil
+}
+
+func (svc *ModelService) claimCatalogCheck(ctx context.Context, now time.Time, scheduled bool) (*CatalogCheckStatus, string, error) {
+	var state *CatalogCheckStatus
+	var token string
+	for range 3 {
+		err := svc.RunInTransaction(ctx, func(ctx context.Context) error {
+			var old string
+			var err error
+			state, old, err = svc.readCatalogCheck(ctx)
+			if err != nil {
+				return err
+			}
+			if scheduled {
+				if !state.Settings.Enabled {
+					return nil
+				}
+				minute := now.Truncate(time.Minute)
+				due, err := state.Settings.next(minute.Add(-time.Minute))
+				if err != nil {
+					return err
+				}
+				day := due.Format(time.DateOnly)
+				if !due.Equal(minute) || state.ScheduledDay == day {
+					return nil
+				}
+				state.ScheduledDay = day
+			}
+			state.LastAttempt = &now
+			token, err = svc.saveCheckResult(ctx, old, state.catalogCheckResult)
+			return err
+		})
+		if !errors.Is(err, errCheckClaimChanged) && !catalogWriteBusy(err) {
+			return state, token, err
+		}
+	}
+	return nil, "", errCheckClaimChanged
 }
 
 func (svc *ModelService) CheckModelCatalog(ctx context.Context) (*CatalogCheckStatus, error) {
@@ -154,34 +201,11 @@ func (svc *ModelService) CheckModelCatalog(ctx context.Context) (*CatalogCheckSt
 
 func (svc *ModelService) checkModelCatalog(ctx context.Context, now time.Time, scheduled bool) (*CatalogCheckStatus, error) {
 	return authz.RunAsHost(ctx, svc.entFromContext(ctx), "check-model-catalog", func(ctx context.Context) (*CatalogCheckStatus, error) {
-		state, old, err := svc.readCatalogCheck(ctx)
-		if err != nil {
-			return nil, err
+		state, token, err := svc.claimCatalogCheck(ctx, now, scheduled)
+		if err != nil || token == "" {
+			return state, err
 		}
 		cfg := state.Settings
-		if scheduled {
-			if !cfg.Enabled {
-				return state, nil
-			}
-			minute := now.Truncate(time.Minute)
-			due, err := cfg.next(minute.Add(-time.Minute))
-			if err != nil {
-				return nil, err
-			}
-			day := due.Format(time.DateOnly)
-			if !due.Equal(minute) || state.ScheduledDay == day {
-				return state, nil
-			}
-			state.ScheduledDay = day
-		}
-		state.LastAttempt = &now
-		token, claimed, err := svc.compareCheckResult(ctx, old, state)
-		if err != nil {
-			return nil, err
-		}
-		if !claimed {
-			return svc.CatalogCheckStatus(ctx)
-		}
 		snapshot, err := svc.catalog.snapshot(ctx, false, true)
 		var preview *CatalogImportPreview
 		if err == nil && snapshot.Source == catalogSourceUpstream {
@@ -200,14 +224,14 @@ func (svc *ModelService) checkModelCatalog(ctx context.Context, now time.Time, s
 				}
 			}
 		}
-		_, _, saveErr := svc.compareCheckResult(ctx, token, state)
+		_, saveErr := svc.saveCheckResult(ctx, token, state.catalogCheckResult)
 		if saveErr != nil {
 			return nil, saveErr
 		}
 		if err != nil {
 			return nil, err
 		}
-		return svc.CatalogCheckStatus(ctx)
+		return state, nil
 	})
 }
 

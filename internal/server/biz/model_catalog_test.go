@@ -28,6 +28,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/model"
 	"github.com/looplj/axonhub/internal/objects"
+	"github.com/looplj/axonhub/internal/pkg/xcache"
 )
 
 const testCatalog = `{"providers":{
@@ -402,6 +403,26 @@ func TestCatalogCheckScopeUnion(t *testing.T) {
 	expected := offers(CatalogImportScope{Channels: true, Tracked: true})
 	require.ElementsMatch(t, []string{"moonshot", "moonshot-ai"}, expected)
 	require.ElementsMatch(t, expected, offers(CatalogImportScope{Channels: true, Tracked: true, Providers: []string{"moonshot"}}))
+}
+
+func TestCatalogCheckAcrossInstances(t *testing.T) {
+	f := catalogFixture(t)
+	secondSystem := NewSystemService(SystemServiceParams{Ent: f.db, CacheConfig: xcache.Config{Mode: xcache.ModeMemory}})
+	secondCatalog := NewCatalogService(secondSystem, f.svc.catalog.httpClient)
+	second := NewModelService(ModelServiceParams{Ent: f.db, Catalog: secondCatalog, SystemService: secondSystem})
+	firstRun, err := f.svc.CheckModelCatalog(f.ctx)
+	require.NoError(t, err)
+	cached, err := second.CatalogCheckStatus(f.ctx)
+	require.NoError(t, err)
+	require.Equal(t, firstRun.LastSuccess, cached.LastSuccess)
+	_, err = f.svc.CheckModelCatalog(f.ctx)
+	require.NoError(t, err)
+	before := f.requests.Load()
+	f.body.Store("unavailable")
+	now, err := second.CheckModelCatalog(f.ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), f.requests.Load()-before)
+	require.True(t, now.Failed)
 }
 
 func TestCatalogImportConcurrentEdit(t *testing.T) {
