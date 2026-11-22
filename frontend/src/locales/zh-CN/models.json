@@ -304,6 +304,7 @@
   "models.import.aliases": "用于路由的原始 ID",
   "models.import.priceSource": "报价来源",
   "models.import.noSource": "仅导入模型资料",
+  "models.import.noQuotes": "暂无参考价",
   "models.import.noPrices": "未选用参考价",
   "models.import.currentPrice": "当前价格",
   "models.import.referencePrice": "基础报价",

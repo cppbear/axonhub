@@ -196,7 +196,7 @@ function PreviewRows({
           if (row.archived) status = 'archived';
           else if (!row.offers.length) status = 'unmatched';
           else if (!row.preferred && !draft.provider) status = 'chooseSource';
-          const priceSummary = draft.prices
+          let priceSummary = draft.prices
             .map((a) => {
               const next = a.expected;
               const current = row.prices.find((r) => r.field === a.field)?.value;
@@ -205,6 +205,10 @@ function PreviewRows({
                 : `${t('models.modelCard.' + a.field)} ${current == null ? '' : formatPrice(current) + ' → '}${next == null ? '—' : formatPrice(next)}`;
             })
             .join(' · ');
+          if (!priceSummary && !row.version && row.offers.length) {
+            const hasQuote = row.offers.some((o) => o.rates.some((r) => r.base != null || r.tiers.length > 0));
+            priceSummary = t(hasQuote ? 'models.import.noPrices' : 'models.import.noQuotes');
+          }
           return (
             <div key={row.modelID} className='space-y-1 border-b p-2 last:border-b-0'>
               <div className='flex items-center gap-3'>
@@ -226,7 +230,7 @@ function PreviewRows({
                     {t('models.import.filter.' + status)}
                     {row.mergeTargetOccupied && ' · ' + t('models.import.targetOccupied', { id: row.mergeTarget })}
                     {draft.provider ? ' · ' + draft.provider : ''}
-                    {priceSummary ? ' · ' + priceSummary : !row.version && draft.provider ? ' · ' + t('models.import.noPrices') : ''}
+                    {priceSummary && ' · ' + priceSummary}
                   </span>
                 </button>
               </div>

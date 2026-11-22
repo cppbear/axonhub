@@ -1,6 +1,7 @@
 // 职责: 展示模型各项报价、阶梯条件和已有价格来源，并构造明确的导入选择。
 // 关联文件:
 //   frontend/src/features/models/components/models-catalog-import.tsx
+//   frontend/src/features/models/components/models-table.tsx
 //   frontend/src/features/models/data/catalog-import.ts
 //   frontend/src/features/models/data/schema.ts
 //   frontend/src/locales/en.json
@@ -20,6 +21,10 @@ export function useReferencePriceFormat() {
     t('currencies.format', { val: value, currency: 'USD', locale: i18n.language, minimumFractionDigits: 0, maximumFractionDigits: 12 });
 }
 
+function findOffer(row: ImportRow, source: Pick<Offer, 'provider' | 'modelID'> | null) {
+  return row.offers.find((offer) => offer.provider === source?.provider && offer.modelID === source.modelID);
+}
+
 function defaultRequest(modelID: string, route: ImportRow['routes'][number]) {
   if (route.requests.includes(modelID)) return modelID;
   if (route.requests.includes(route.actual)) return route.actual;
@@ -29,14 +34,14 @@ function defaultRequest(modelID: string, route: ImportRow['routes'][number]) {
 
 export function defaultSelection(
   row: ImportRow,
-  offer = row.offers.find((o) => o.provider === row.preferred?.provider && o.modelID === row.preferred?.modelID) ?? null,
+  offer = findOffer(row, row.preferred) ?? null,
   replaceSource = false
 ): ImportSelection {
   const prices: PriceSelection[] = [];
   for (const field of referencePriceFields) {
     const local = row.prices.find((p) => p.field === field);
     if (row.version && !local?.follow) continue;
-    const source = local && !replaceSource ? row.offers.find((o) => o.provider === local.provider && o.modelID === local.modelID) : offer;
+    const source = local && !replaceSource ? findOffer(row, local) : offer;
     const rate = source?.rates.find((r) => r.field === field);
     if (!source || rate?.base == null) continue;
     if (local && local.value === rate.base && local.provider === source.provider && local.modelID === source.modelID) continue;
@@ -179,7 +184,8 @@ export function PriceEditor({
             {referencePriceFields.map((field) => {
               const local = row.prices.find((r) => r.field === field);
               const action = draft.prices.find((r) => r.field === field);
-              const source = row.offers.find((o) => o.provider === action?.provider && o.modelID === action?.modelID) ?? offer;
+              const binding = action?.provider ? action : local;
+              const source = binding?.provider ? findOffer(row, binding) : offer;
               const rate = source?.rates.find((r) => r.field === field);
               return (
                 <tr

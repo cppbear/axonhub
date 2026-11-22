@@ -304,6 +304,7 @@
   "models.import.aliases": "Original IDs for routing",
   "models.import.priceSource": "Price source",
   "models.import.noSource": "Model details only",
+  "models.import.noQuotes": "No reference prices available",
   "models.import.noPrices": "No reference prices selected",
   "models.import.currentPrice": "Current",
   "models.import.referencePrice": "Base quote",

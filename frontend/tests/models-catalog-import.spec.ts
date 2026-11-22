@@ -1,4 +1,4 @@
-// 职责: 验证跨页全选、手机端阶梯价选择和已勾选报价在后台刷新时的保护。
+// 职责: 验证批量导入的分项报价来源、缺价提示和跨页选择在刷新后的行为。
 // 关联文件:
 //   frontend/src/features/models/components/models-catalog-import.tsx
 //   frontend/src/features/models/components/models-catalog-prices.tsx
@@ -8,6 +8,14 @@
 import { expect, test } from '@playwright/test';
 import { gotoAndEnsureAuth } from './auth.utils';
 
+test.beforeEach(async ({ page }) => {
+  await page.route('**/admin/graphql', async (route) => {
+    if (route.request().postDataJSON().operationName !== 'OnboardingInfo') return route.fallback();
+    const onboardingInfo = { onboarded: true, systemModelSetting: { onboarded: true }, autoDisableChannel: { onboarded: true } };
+    return route.fulfill({ json: { data: { onboardingInfo } } });
+  });
+});
+
 test('a filtered batch keeps the quotes originally reviewed across a background refresh', async ({ page }) => {
   let revision = 'first';
   const provider = 'model-test';
@@ -16,10 +24,6 @@ test('a filtered batch keeps the quotes originally reviewed across a background 
   let applied: Selection[] = [];
   await page.route('**/admin/graphql', async (route) => {
     const body = route.request().postDataJSON();
-    if (body.operationName === 'OnboardingInfo') {
-      const onboardingInfo = { onboarded: true, systemModelSetting: { onboarded: true }, autoDisableChannel: { onboarded: true } };
-      return route.fulfill({ json: { data: { onboardingInfo } } });
-    }
     if (body.operationName === 'ApplyCatalogImport') {
       applied = body.variables.selections;
       const outcomes = body.variables.selections.map(({ modelID }: { modelID: string }) => ({ modelID, status: 'catalogChanged' }));
@@ -78,4 +82,56 @@ test('a filtered batch keeps the quotes originally reviewed across a background 
   expect(applied.flatMap((row) => row.prices).filter(price=>price.action === 'TIER')).toEqual([
     expect.objectContaining({ field: 'cacheWrite', tier: 'context 256000', expected: 2.5 }),
   ]);
+});
+
+test('reference prices show the bound source and distinguish missing from unselected quotes', async ({ page }) => {
+  const details = { name: 'Model', developer: 'dev', identity: 'v1', type: 'chat' };
+  const rate = (field: string, base: number | null) => ({ field, base, tiers: [] });
+  const providerA = { ...details, provider: 'provider-a', modelID: 'mixed', rates: [rate('input', 1)] };
+  const providerB = { ...details, provider: 'provider-b', modelID: 'mixed', rates: [rate('input', 9), rate('output', 20), rate('cacheRead', 5)] };
+  const row = (id: string) => ({
+    ...details, modelID: id, members: [{ id, identity: '' }], routes: [], version: '',
+    mergeTarget: '', mergeTargetOccupied: false, changed: false, archived: false,
+  });
+  const previews = [
+    {
+      ...row('mixed'), version: 'saved', changed: true, offers: [providerA, providerB], preferred: providerB,
+      prices: [
+        { field: 'input', value: 1, follow: true, provider: 'provider-a', modelID: 'mixed' },
+        { field: 'output', value: 15, follow: true, provider: 'provider-b', modelID: 'mixed' },
+        { field: 'cacheRead', value: 3, follow: true, provider: 'removed', modelID: 'mixed' },
+      ],
+    },
+    ...[
+      { modelID: 'no-rates', rates: [rate('input', null)] },
+      { modelID: 'zero', rates: [rate('input', 0)] },
+      { modelID: 'tiers-only', rates: [{ field: 'input', base: null, tiers: [{ label: 'context 256000', value: 2.5 }] }] },
+    ].map(({ modelID, rates }) => {
+      const offer = { ...providerA, modelID, rates };
+      return { ...row(modelID), offers: [offer], preferred: offer, prices: [] };
+    }),
+  ];
+  await page.route('**/admin/graphql', (route) => {
+    if (route.request().postDataJSON().operationName !== 'CatalogImportPreview') return route.fallback();
+    const preview = { rows: previews, providers: [], source: 'upstream', upstreamURL: 'https://example.test', revision: 'same' };
+    return route.fulfill({ json: { data: { catalogImportPreview: preview } } });
+  });
+  await gotoAndEnsureAuth(page, '/models');
+  await page.getByTestId('catalog-import-open').click();
+  const expand = (id: string) => page.getByTestId('catalog-import-expand-' + id);
+  await expand('mixed').click();
+  const quote = (field: string) => page.getByTestId('catalog-price-row-' + field).getByRole('cell').nth(1);
+  await expect(quote('input')).toContainText('$1');
+  await expect(quote('output')).toContainText('$20');
+  await expect(quote('cacheRead')).toContainText('—');
+  const inputAction = page.getByTestId('catalog-price-action-input');
+  const fromB = inputAction.locator('optgroup[label="provider-b · mixed"] option').first();
+  await inputAction.selectOption(await fromB.getAttribute('value') as string);
+  await expect(quote('input')).toContainText('$9');
+  await expect(expand('no-rates')).toContainText(/No reference prices available|暂无参考价/);
+  await expect(expand('tiers-only')).toContainText(/No reference prices selected|未选用参考价/);
+  await expect(expand('zero')).toContainText('$0');
+  await expand('zero').click();
+  await page.getByTestId('catalog-price-action-input').selectOption('-1');
+  await expect(expand('zero')).toContainText(/No reference prices selected|未选用参考价/);
 });
