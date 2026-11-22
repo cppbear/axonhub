@@ -4,7 +4,7 @@
 //   frontend/src/features/models/components/models-catalog-prices.tsx
 //   frontend/src/features/models/data/catalog-import.ts
 // 注意事项:
-//   导入提交使用隔离响应。
+//   导入提交使用隔离响应，角色场景使用独立浏览器上下文。
 import { expect, test } from '@playwright/test';
 import { gotoAndEnsureAuth } from './auth.utils';
 
@@ -165,6 +165,34 @@ test('reference prices show the bound source and distinguish missing from unsele
     type: 'embedding', name: 'Vector embedding', prices: [],
     routes: [{ channelID: 12, actual: 'zero', request: 'public-zero' }],
   })]);
+});
+
+test('site settings roles can open the schedule without an import preview', async ({ page }) => {
+  let importReads = 0;
+  let scopes = ['read_channels', 'read_settings'];
+  await page.route('**/admin/graphql', async (route) => {
+    const { operationName } = route.request().postDataJSON();
+    if (operationName === 'CatalogImportPreview') importReads++;
+    if (operationName === 'MyProjects') return route.fulfill({ json: { data: { myProjects: [] } } });
+    if (operationName !== 'Me') return route.fallback();
+    const response = await route.fetch();
+    const json = await response.json();
+    Object.assign(json.data.me, { isOwner: false, scopes, projects: [], preferLanguage: scopes.includes('write_settings') ? 'zh-CN' : 'en' });
+    return route.fulfill({ json });
+  });
+  await gotoAndEnsureAuth(page, '/models');
+  const open = page.getByTestId('catalog-import-open');
+  await open.click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('button', { name: /Check now|立即检查/i })).toHaveCount(0);
+  await expect(dialog.getByRole('heading', { name: 'Update checks' })).toBeVisible();
+  await expect(dialog.locator('input[type=time]')).toBeDisabled();
+  scopes = [...scopes, 'write_settings'];
+  await page.reload();
+  await open.click();
+  await expect(dialog.getByRole('heading', { name: '检查更新' })).toBeVisible();
+  await expect(dialog.locator('input[type=time]')).toBeEnabled();
+  expect(importReads).toBe(0);
 });
 
 test('a lost apply response requires a refreshed preview before retrying', async ({ page }) => {

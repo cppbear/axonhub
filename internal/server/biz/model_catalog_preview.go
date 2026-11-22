@@ -1,8 +1,9 @@
-// 职责: 比较全局模型与服务商目录，生成手动导入的候选清单。
+// 职责: 比较全局模型与服务商目录，生成手动导入和每日检查共用的候选清单。
 // 关联文件:
 //
 //	internal/server/biz/catalog.go
 //	internal/server/biz/model_catalog_apply.go
+//	internal/server/biz/model_catalog_schedule.go
 //
 // 注意事项:
 //
@@ -34,9 +35,9 @@ var catalogPriceFields = []string{"input", "output", "cacheRead", "cacheWrite"}
 var catalogCostKeys = map[string]string{"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
 
 type CatalogImportScope struct {
-	Channels     bool
-	Providers    []string
-	IgnorePrefix bool
+	Channels              bool
+	Providers             []string
+	IgnorePrefix, Tracked bool
 }
 
 type CatalogImportTier struct {
@@ -84,6 +85,7 @@ type CatalogImportRow struct {
 	Members                           []CatalogImportMember
 	Routes                            []CatalogImportRoute
 	Archived, Changed                 bool
+	needsReview                       bool
 	Offers                            []*CatalogImportOffer
 	Preferred                         *CatalogImportOffer
 	Prices                            []CatalogImportLocalPrice
@@ -363,7 +365,13 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 	if err != nil {
 		return nil, err
 	}
-	return svc.catalogPreviewFromSnapshot(ctx, scope, snapshot)
+	preview, err := svc.catalogPreviewFromSnapshot(ctx, scope, snapshot)
+	if err == nil && scope.Tracked {
+		preview.Rows = slices.DeleteFunc(preview.Rows, func(row *CatalogImportRow) bool {
+			return row.Version != "" && (row.Archived || (!row.Changed && !row.needsReview))
+		})
+	}
+	return preview, err
 }
 
 func catalogChannelRoutes(ctx context.Context, query *ent.ChannelQuery) (map[string][]CatalogImportRoute, error) {
@@ -401,7 +409,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 	}
 	publicURL.User, publicURL.RawQuery, publicURL.Fragment, publicURL.ForceQuery = nil, "", "", false
 	preview := &CatalogImportPreview{UpstreamURL: publicURL.String(), Source: snapshot.Source, Revision: hex.EncodeToString(revision[:]), Providers: idx.providers, Rows: []*CatalogImportRow{}}
-	if !scope.Channels && len(scope.Providers) == 0 {
+	if !scope.Channels && !scope.Tracked && len(scope.Providers) == 0 {
 		return preview, nil
 	}
 	db := svc.entFromContext(ctx)
@@ -419,6 +427,14 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 		if m.ModelCard != nil {
 			for _, alias := range m.ModelCard.CatalogAliases {
 				importedIDs[alias] = m.ModelID
+			}
+		}
+		if scope.Tracked && m.Status != model.StatusArchived && m.ModelCard != nil {
+			for _, binding := range m.ModelCard.CatalogPrices {
+				if binding.Follow {
+					aliases[m.ModelID] = []string{m.ModelID}
+					break
+				}
 			}
 		}
 	}
@@ -521,7 +537,14 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 					continue
 				}
 				rate := o.rate(p.Field)
-				if rate != nil && rate.Base != nil && p.Canonical == o.Canonical && (p.Value == nil || *p.Value != *rate.Base) {
+				if rate == nil || rate.Base == nil {
+					row.needsReview = true
+					continue
+				}
+				differentPrice := p.Value == nil || *p.Value != *rate.Base
+				if p.Canonical != o.Canonical {
+					row.needsReview = row.needsReview || p.Canonical != "" || differentPrice
+				} else if differentPrice {
 					row.Changed = true
 				}
 			}
