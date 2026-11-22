@@ -250,6 +250,43 @@ func TestCatalogCheckOnlyReportsFollowedFieldsAndSubscribedProviders(t *testing.
 	require.Equal(t, []string{"applied"}, f.apply(t, CatalogImportScope{Providers: []string{"moonshot"}}, fallback, selected))
 }
 
+func TestCatalogCheckAfterProviderRemovesModel(t *testing.T) {
+	f := catalogFixture(t)
+	scope := CatalogImportScope{Providers: []string{"moonshot", "moonshot-ai"}}
+	p := f.preview(t, scope)
+	sel := selection(t, p, "kimi-k3")
+	sel.Prices[0].Provider, sel.Prices[0].Expected = "moonshot", lo.ToPtr(2.9879)
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, sel))
+
+	tracked := CatalogImportScope{Tracked: true}
+	delisted := strings.Replace(testCatalog, `"id":"kimi-k3","name"`, `"id":"replacement","name"`, 1)
+	f.changeCatalog(strings.Replace(delisted, `"moonshot-ai":`, `"other":`, 1))
+	require.Empty(t, f.preview(t, tracked).Rows)
+	for _, tc := range []struct {
+		catalog string
+		changed int
+	}{
+		{delisted, 0},
+		{strings.Replace(delisted, "2.9879", "4", 1), 1},
+	} {
+		f.changeCatalog(tc.catalog)
+		state, err := f.svc.CheckModelCatalog(f.ctx)
+		require.NoError(t, err)
+		require.False(t, state.Failed)
+		require.Equal(t, tc.changed, state.Changed)
+		p = f.preview(t, tracked)
+		require.Len(t, p.Rows, 1)
+		require.Equal(t, "kimi-k3", p.Rows[0].ModelID)
+		require.True(t, p.Rows[0].needsReview)
+		require.Equal(t, tc.changed > 0, p.Rows[0].Changed)
+	}
+	edit := selection(t, p, "kimi-k3")
+	edit.Prices = []CatalogImportPriceInput{{Field: "output", Action: CatalogPriceFix}}
+	require.Equal(t, []string{"applied"}, f.apply(t, tracked, p, edit))
+	f.changeCatalog(delisted)
+	require.Empty(t, f.preview(t, tracked).Rows)
+}
+
 func TestCatalogModelTypes(t *testing.T) {
 	for raw, want := range map[string]string{"image": "image_generation", "video": "video_generation", "reranking": "rerank", "image-generation": "image_generation", "embedding": "embedding", "audio": "audio"} {
 		require.Equal(t, want, catalogModelType(raw))
@@ -542,6 +579,9 @@ func TestCatalogPreviewAfterProviderRemovesModel(t *testing.T) {
 	p = f.preview(t, scope)
 	require.Len(t, p.Rows, 1)
 	require.Equal(t, []string{"other-alias"}, memberIDs(selection(t, p, "local-kimi")))
+	watched := f.preview(t, CatalogImportScope{Tracked: true, Providers: scope.Providers})
+	require.Len(t, watched.Rows, 1)
+	require.Equal(t, p.Rows[0].Members, watched.Rows[0].Members)
 	f.changeCatalog(`{"providers":{"other":{"models":[]}}}`)
 	require.Empty(t, f.preview(t, scope).Rows)
 	f.changeCatalog(`{"providers":{"moonshot-ai":{"models":[]},"other":{"models":[]}}}`)

@@ -429,14 +429,6 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 				importedIDs[alias] = m.ModelID
 			}
 		}
-		if scope.Tracked && m.Status != model.StatusArchived && m.ModelCard != nil {
-			for _, binding := range m.ModelCard.CatalogPrices {
-				if binding.Follow {
-					aliases[m.ModelID] = []string{m.ModelID}
-					break
-				}
-			}
-		}
 	}
 	// An exact local ID takes precedence over an alias recorded on another card.
 	for id := range existing {
@@ -484,15 +476,19 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 			}
 		}
 	}
-	// Keep missing followed offers reachable under their existing local model ID.
+	// Checks include all followed models. Provider previews also include delisted followed offers.
 	selectedProviders := lo.Intersect(scope.Providers, idx.providers)
-	if snapshot.Source == catalogSourceUpstream && len(selectedProviders) > 0 {
+	if scope.Tracked || (snapshot.Source == catalogSourceUpstream && len(selectedProviders) > 0) {
 		for _, m := range local {
 			if aliases[m.ModelID] != nil || m.Status == model.StatusArchived || m.ModelCard == nil {
 				continue
 			}
 			for _, binding := range m.ModelCard.CatalogPrices {
-				if binding.Follow && slices.Contains(selectedProviders, binding.Provider) && idx.offers[catalogOfferKey{binding.Provider, binding.ModelID}] == nil {
+				if !binding.Follow {
+					continue
+				}
+				key := catalogOfferKey{binding.Provider, binding.ModelID}
+				if scope.Tracked || (slices.Contains(selectedProviders, key.provider) && idx.offers[key] == nil) {
 					aliases[m.ModelID] = []string{m.ModelID}
 					break
 				}
@@ -542,6 +538,9 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 				}
 				o := idx.offers[catalogOfferKey{p.Provider, p.ModelID}]
 				if o == nil {
+					if p.Follow && snapshot.Source == catalogSourceUpstream && slices.Contains(idx.providers, p.Provider) {
+						row.needsReview = true
+					}
 					continue
 				}
 				candidates = append(candidates, o)
