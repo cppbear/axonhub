@@ -212,12 +212,21 @@ test('reference prices show the bound source and distinguish missing from unsele
   })]);
 });
 
-test('site settings roles can open the schedule without an import preview', async ({ page }) => {
+test('only the schedule dialog and the channel editor badge poll for check status', async ({ page }) => {
   let importReads = 0;
+  let statusReads = 0;
   let scopes = ['read_channels', 'read_settings'];
   await page.route('**/admin/graphql', async (route) => {
     const { operationName } = route.request().postDataJSON();
     if (operationName === 'CatalogImportPreview') importReads++;
+    if (operationName === 'CatalogCheckStatus') {
+      statusReads++;
+      const catalogCheckStatus = {
+        settings: { enabled: false, time: '08:30', timezone: 'UTC', providers: [], ignorePrefix: false },
+        lastAttempt: null, lastSuccess: '2026-01-01T00:00:00Z', nextCheck: null, failed: false, available: 2, changed: 1,
+      };
+      return route.fulfill({ json: { data: { catalogCheckStatus } } });
+    }
     if (operationName === 'MyProjects') return route.fulfill({ json: { data: { myProjects: [] } } });
     if (operationName !== 'Me') return route.fallback();
     const response = await route.fetch();
@@ -227,17 +236,37 @@ test('site settings roles can open the schedule without an import preview', asyn
   });
   await gotoAndEnsureAuth(page, '/models');
   const open = page.getByTestId('catalog-import-open');
+  await expect(open).toBeVisible();
+  await page.clock.install();
+  await page.clock.fastForward(61_000);
+  expect(statusReads).toBe(0);
   await open.click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('button', { name: /Check now|立即检查/i })).toHaveCount(0);
   await expect(dialog.getByRole('heading', { name: 'Update checks' })).toBeVisible();
   await expect(dialog.locator('input[type=time]')).toBeDisabled();
+  expect(statusReads).toBeGreaterThan(0);
+  const openReads = statusReads;
+  await page.clock.fastForward(61_000);
+  await expect.poll(() => statusReads).toBeGreaterThan(openReads);
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  const closedReads = statusReads;
+  await page.clock.fastForward(61_000);
+  expect(statusReads).toBe(closedReads);
   scopes = [...scopes, 'write_settings'];
   await page.reload();
   await open.click();
   await expect(dialog.getByRole('heading', { name: '检查更新' })).toBeVisible();
   await expect(dialog.locator('input[type=time]')).toBeEnabled();
   expect(importReads).toBe(0);
+
+  scopes = ['read_channels', 'write_channels'];
+  await page.reload();
+  await expect(open).toContainText('3');
+  const badgeReads = statusReads;
+  await page.clock.fastForward(61_000);
+  await expect.poll(() => statusReads).toBeGreaterThan(badgeReads);
 });
 
 test('a lost apply response requires a refreshed preview before retrying', async ({ page }) => {

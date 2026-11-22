@@ -140,9 +140,10 @@ export function useCatalogApply() {
     ]),
   });
 }
-export function useCatalogCheckStatus() {
+export function useCatalogCheckStatus(enabled = true) {
   return useQuery({
     queryKey: ['model-catalog-check'],
+    enabled,
     queryFn: async () =>
       (await graphqlRequest<{ catalogCheckStatus: CheckStatus }>(`query CatalogCheckStatus { catalogCheckStatus { ${statusFields} } }`))
         .catalogCheckStatus,

@@ -109,7 +109,7 @@ function BulkAddButton() {
 function CatalogImportButton({ canImport }: { canImport: boolean }) {
   const { t } = useTranslation();
   const { setOpen } = useModels();
-  const { data } = useCatalogCheckStatus();
+  const { data } = useCatalogCheckStatus(canImport);
   return (
     <Button variant='outline' className='shrink-0' onClick={() => setOpen('catalogImport')} data-testid='catalog-import-open'>
       <IconDownload className='mr-2 h-4 w-4' />
