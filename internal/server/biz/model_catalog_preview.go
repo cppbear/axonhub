@@ -351,6 +351,29 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 	return preview, err
 }
 
+func catalogChannelRoutes(ctx context.Context, query *ent.ChannelQuery) (map[string][]CatalogImportRoute, error) {
+	channels, err := query.Where(channel.StatusIn(channel.StatusEnabled, channel.StatusDisabled)).
+		Order(ent.Asc(channel.FieldID)).
+		Select(channel.FieldID, channel.FieldName, channel.FieldSettings, channel.FieldSupportedModels).All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load configured channel models: %w", err)
+	}
+	routes := map[string][]CatalogImportRoute{}
+	for _, ch := range channels {
+		requests := map[string][]string{}
+		for name, entry := range (&Channel{Channel: ch}).GetModelEntries() {
+			requests[entry.ActualModel] = append(requests[entry.ActualModel], name)
+		}
+		for _, id := range lo.Uniq(ch.SupportedModels) {
+			if id != "" {
+				slices.Sort(requests[id])
+				routes[id] = append(routes[id], CatalogImportRoute{ChannelID: ch.ID, ChannelName: ch.Name, Actual: id, Requests: requests[id]})
+			}
+		}
+	}
+	return routes, nil
+}
+
 func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope CatalogImportScope, snapshot CatalogSnapshot) (*CatalogImportPreview, error) {
 	idx, err := indexCatalog(snapshot.Data)
 	if err != nil {
@@ -396,24 +419,12 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 	mergeTargets := map[string]string{}
 	allIDs := map[string]bool{}
 	if scope.Channels {
-		channels, err := db.Channel.Query().Where(channel.StatusIn(channel.StatusEnabled, channel.StatusDisabled)).
-			Select(channel.FieldID, channel.FieldName, channel.FieldSettings, channel.FieldSupportedModels).Order(ent.Asc(channel.FieldID)).All(ctx)
+		channelRoutes, err = catalogChannelRoutes(ctx, db.Channel.Query())
 		if err != nil {
-			return nil, fmt.Errorf("load configured channel models: %w", err)
+			return nil, err
 		}
-		for _, ch := range channels {
-			requests := map[string][]string{}
-			for name, entry := range (&Channel{Channel: ch}).GetModelEntries() {
-				requests[entry.ActualModel] = append(requests[entry.ActualModel], name)
-			}
-			for _, actual := range lo.Uniq(ch.SupportedModels) {
-				if actual == "" {
-					continue
-				}
-				slices.Sort(requests[actual])
-				channelRoutes[actual] = append(channelRoutes[actual], CatalogImportRoute{ch.ID, ch.Name, actual, requests[actual]})
-				allIDs[actual] = true
-			}
+		for id := range channelRoutes {
+			allIDs[id] = true
 		}
 	}
 	for key, offer := range idx.offers {

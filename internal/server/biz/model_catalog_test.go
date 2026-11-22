@@ -528,3 +528,34 @@ func TestCatalogDoesNotConvertAutomaticMergeToManualAtApply(t *testing.T) {
 	f.channel(t, channel.StatusDisabled, "c/shared")
 	require.Equal(t, []string{"conflict"}, f.apply(t, scope, p, sel))
 }
+
+func TestCatalogImportRechecksRoutesPerRow(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "first", "second", "third", "replacement")
+	ch := f.db.Channel.Query().OnlyX(f.ctx)
+	settings := &objects.ChannelSettings{HideMappedModels: true, ModelMappings: []objects.ModelMapping{{From: "public", To: "second"}}}
+	ch.Update().SetSettings(settings).ExecX(f.ctx)
+	scope := CatalogImportScope{Channels: true}
+	p := f.preview(t, scope)
+	var selections []CatalogImportSelection
+	for _, id := range []string{"first", "second", "third"} {
+		sel := selection(t, p, id)
+		sel.Developer = "dev"
+		selections = append(selections, sel)
+	}
+	require.Equal(t, "public", selections[1].Routes[0].Request)
+	f.db.Model.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, mutation ent.Mutation) (ent.Value, error) {
+			value, err := next.Mutate(ctx, mutation)
+			if id, _ := mutation.(*ent.ModelMutation).ModelID(); err == nil && id == "first" {
+				runAfterCommit(ctx, func(context.Context) {
+					settings.ModelMappings[0].To = "replacement"
+					ch.Update().SetSettings(settings).SetRemark("edited during import").ExecX(f.ctx)
+				})
+			}
+			return value, err
+		})
+	})
+	require.Equal(t, []string{"applied", "conflict", "applied"}, f.apply(t, scope, p, selections...))
+	require.False(t, f.db.Model.Query().Where(model.ModelIDEQ("second")).ExistX(f.ctx))
+}

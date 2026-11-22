@@ -7,7 +7,7 @@
 //
 // 注意事项:
 //
-//	单行冲突不撤销其他已确认行；更新价格不能替换渠道关联或手工维护的模型资料。
+//	新建模型须在行事务内复核公开请求名；单行冲突不撤销其他行，更新价格保留已有渠道关联。
 package biz
 
 import (
@@ -20,11 +20,14 @@ import (
 	"slices"
 	"strings"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"github.com/samber/lo"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/looplj/axonhub/internal/ent"
+	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/model"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xerrors"
@@ -118,7 +121,7 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, row
 		return errCatalogConflict
 	}
 	choices := map[catalogOfferKey]*CatalogImportOffer{}
-	var routes []CatalogImportRoute
+	var channelIDs []int
 	memberCount := 0
 	for _, row := range parts {
 		if row.Version != "" || (row.ModelID != sel.ModelID && row.MergeTargetOccupied) {
@@ -137,7 +140,9 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, row
 		for _, o := range row.Offers {
 			choices[catalogOfferKey{o.Provider, o.ModelID}] = o
 		}
-		routes = append(routes, row.Routes...)
+		for _, route := range row.Routes {
+			channelIDs = append(channelIDs, route.ChannelID)
+		}
 	}
 	if memberCount != len(sel.Members) || (len(parts) > 1 && rows[sel.ModelID] != nil && !slices.Contains(parts, rows[sel.ModelID])) {
 		return errCatalogSelection
@@ -158,7 +163,7 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, row
 		return err
 	}
 	settings := &objects.ModelSettings{LoadBalancerStrategy: "default", TraceStickyMode: "default"}
-	associations, err := catalogAssociations(sel, routes)
+	associations, err := catalogAssociations(ctx, db, sel, channelIDs)
 	if err != nil {
 		return err
 	}
@@ -213,7 +218,7 @@ func (svc *ModelService) updateCatalogPrices(ctx context.Context, source string,
 }
 
 // Resolve each reviewed (channel, upstream model) against its currently exposed request names.
-func catalogAssociations(sel CatalogImportSelection, routes []CatalogImportRoute) ([]*objects.ModelAssociation, error) {
+func catalogAssociations(ctx context.Context, db *ent.Client, sel CatalogImportSelection, channelIDs []int) ([]*objects.ModelAssociation, error) {
 	type key struct {
 		channel int
 		actual  string
@@ -222,29 +227,45 @@ func catalogAssociations(sel CatalogImportSelection, routes []CatalogImportRoute
 	for _, choice := range sel.Routes {
 		choices[key{choice.ChannelID, choice.Actual}] = choice.Request
 	}
-	if len(choices) != len(routes) || len(choices) != len(sel.Routes) {
+	if len(choices) != len(sel.Routes) {
 		return nil, errCatalogConflict
 	}
-	configured := map[string]bool{}
-	associations := []*objects.ModelAssociation{}
-	for _, route := range routes {
-		configured[route.Actual] = true
-		request, ok := choices[key{route.ChannelID, route.Actual}]
-		if !ok {
-			return nil, errCatalogConflict
+	var current map[string][]CatalogImportRoute
+	if len(channelIDs) > 0 {
+		query := db.Channel.Query().Where(channel.IDIn(lo.Uniq(channelIDs)...))
+		if db.Driver().Dialect() != dialect.SQLite {
+			query.Modify(func(s *sql.Selector) { s.ForUpdate() })
 		}
-		if request == "" && len(route.Requests) == 0 {
-			continue
+		var err error
+		current, err = catalogChannelRoutes(ctx, query)
+		if err != nil {
+			return nil, err
 		}
-		if !slices.Contains(route.Requests, request) {
-			return nil, errCatalogConflict
-		}
-		associations = append(associations, &objects.ModelAssociation{Type: "channel_model", ChannelModel: &objects.ChannelModelAssociation{ChannelID: route.ChannelID, ModelID: request}})
 	}
+	associations := []*objects.ModelAssociation{}
 	for _, member := range sel.Members {
-		if !configured[member.ID] {
+		routes := current[member.ID]
+		if len(routes) == 0 {
 			associations = append(associations, &objects.ModelAssociation{Type: "model", ModelID: &objects.ModelIDAssociation{ModelID: member.ID}})
 		}
+		for _, route := range routes {
+			k := key{route.ChannelID, route.Actual}
+			request, ok := choices[k]
+			if !ok {
+				return nil, errCatalogConflict
+			}
+			delete(choices, k)
+			if request == "" && len(route.Requests) == 0 {
+				continue
+			}
+			if !slices.Contains(route.Requests, request) {
+				return nil, errCatalogConflict
+			}
+			associations = append(associations, &objects.ModelAssociation{Type: "channel_model", ChannelModel: &objects.ChannelModelAssociation{ChannelID: route.ChannelID, ModelID: request}})
+		}
+	}
+	if len(choices) > 0 {
+		return nil, errCatalogConflict
 	}
 	return associations, nil
 }
