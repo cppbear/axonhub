@@ -71,12 +71,13 @@ type CatalogService struct {
 	system     *SystemService
 	httpClient *httpclient.HttpClient
 
-	mu         sync.Mutex
-	filtered   heldCatalog
-	unfiltered heldCatalog
-	generation uint64
-	holdTTL    time.Duration
-	sf         singleflight.Group
+	mu          sync.Mutex
+	filtered    heldCatalog
+	unfiltered  heldCatalog
+	generation  uint64
+	upstreamURL string // Effective mirror for this cache generation.
+	holdTTL     time.Duration
+	sf          singleflight.Group
 }
 
 func NewCatalogService(system *SystemService, httpClient *httpclient.HttpClient) *CatalogService {
@@ -117,14 +118,52 @@ func (s *CatalogService) Invalidate() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.invalidateLocked()
+}
+
+func (s *CatalogService) invalidateLocked() {
 	s.generation++
 	s.filtered.clear()
 	s.unfiltered.clear()
 }
 
+// A transaction reads the effective URL on the primary and bypasses the system settings caches.
+func (s *CatalogService) currentUpstreamURL(ctx context.Context) (string, error) {
+	var url string
+	err := s.system.RunInTransaction(ctx, func(ctx context.Context) error {
+		settings, err := s.system.CatalogSettings(ctx)
+		if err != nil {
+			return err
+		}
+		url = settings.EffectiveUpstreamURL()
+		return nil
+	})
+	return url, err
+}
+
 func (s *CatalogService) ensure(ctx context.Context, filtered, fresh bool) (*catalogPayload, error) {
 	s.mu.Lock()
 	generation := s.generation
+	s.mu.Unlock()
+
+	// A shared fetch outlives its first caller, including the settings read.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), catalogFetchTimeout)
+	defer cancel()
+	upstreamURL, err := s.currentUpstreamURL(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if generation != s.generation {
+		s.mu.Unlock()
+		return nil, errCatalogInvalidated
+	}
+	if s.upstreamURL != upstreamURL {
+		s.invalidateLocked()
+		s.upstreamURL = upstreamURL
+		generation = s.generation
+	}
 	held := s.slot(filtered).payload
 	s.mu.Unlock()
 	if held != nil && !fresh {
@@ -132,9 +171,6 @@ func (s *CatalogService) ensure(ctx context.Context, filtered, fresh bool) (*cat
 	}
 	key := fmt.Sprintf("%t/%d", filtered, generation)
 	value, err, _ := s.sf.Do(key, func() (any, error) {
-		// The singleflight load outlives the first caller, including its settings read.
-		ctx := context.WithoutCancel(ctx)
-		upstreamURL := s.system.CatalogSettingsOrDefault(ctx).EffectiveUpstreamURL()
 		data, source, err := s.load(ctx, filtered, upstreamURL)
 		if err != nil {
 			return nil, err

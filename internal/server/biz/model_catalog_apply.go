@@ -65,6 +65,12 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 			rows[id.ID] = row
 		}
 	}
+	// Pin the batch to the reviewed source after the download, before writing any row.
+	currentURL, err := svc.catalog.currentUpstreamURL(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sourceChanged := revision != preview.Revision || snapshot.upstreamURL != currentURL
 	used := map[string]bool{}
 	result := make([]CatalogImportOutcome, 0, len(selections))
 	for _, selection := range selections {
@@ -72,7 +78,7 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 		switch {
 		case slices.ContainsFunc(selection.Members, func(m CatalogImportMember) bool { return used[m.ID] }):
 			status = CatalogConflict
-		case preview.Revision != revision:
+		case sourceChanged:
 			status = CatalogChanged
 		default:
 			err := svc.RunInTransaction(ctx, func(ctx context.Context) error { return svc.applyCatalogRow(ctx, preview.Source, rows, selection) })
