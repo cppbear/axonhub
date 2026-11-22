@@ -79,16 +79,16 @@ type CatalogRouteChoice struct {
 }
 
 type CatalogImportRow struct {
-	ModelID, Name, Developer, Version string
-	MergeTarget                       string
-	MergeTargetOccupied               bool
-	Members                           []CatalogImportMember
-	Routes                            []CatalogImportRoute
-	Archived, Changed                 bool
-	needsReview                       bool
-	Offers                            []*CatalogImportOffer
-	Preferred                         *CatalogImportOffer
-	Prices                            []CatalogImportLocalPrice
+	ModelID, Name, Version string
+	MergeTarget            string
+	MergeTargetOccupied    bool
+	Members                []CatalogImportMember
+	Routes                 []CatalogImportRoute
+	Archived, Changed      bool
+	needsReview            bool
+	Offers                 []*CatalogImportOffer
+	Preferred              *CatalogImportOffer
+	Prices                 []CatalogImportLocalPrice
 }
 
 type CatalogImportPreview struct {
@@ -515,7 +515,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 			}
 		}
 		if m := existing[id]; m != nil {
-			row.Name, row.Developer, row.Archived = m.Name, m.Developer, m.Status == model.StatusArchived
+			row.Name, row.Archived = m.Name, m.Status == model.StatusArchived
 			row.Version, err = ModelEditVersion(m)
 			if err != nil {
 				return nil, err
@@ -549,7 +549,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 				}
 			}
 		} else if row.Preferred != nil {
-			row.Name, row.Developer = row.Preferred.Name, row.Preferred.Developer
+			row.Name = row.Preferred.Name
 		}
 		row.Offers = lo.Uniq(candidates)
 		sort.Slice(row.Offers, func(i, j int) bool {
