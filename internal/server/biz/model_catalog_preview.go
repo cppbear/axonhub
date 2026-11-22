@@ -59,10 +59,10 @@ type CatalogImportOffer struct {
 }
 
 type CatalogImportLocalPrice struct {
-	Field             ReferencePriceField
-	Value             *float64
-	Follow            bool
-	Provider, ModelID string
+	Field                        ReferencePriceField
+	Value                        *float64
+	Follow                       bool
+	Provider, ModelID, Canonical string
 }
 
 type CatalogImportMember struct{ ID, Identity string }
@@ -85,6 +85,7 @@ type CatalogImportRow struct {
 	Members                           []CatalogImportMember
 	Routes                            []CatalogImportRoute
 	Archived, Changed                 bool
+	needsReview                       bool
 	Offers                            []*CatalogImportOffer
 	Preferred                         *CatalogImportOffer
 	Prices                            []CatalogImportLocalPrice
@@ -100,6 +101,7 @@ type CatalogPriceAction string
 
 const (
 	CatalogPriceFollow  CatalogPriceAction = "FOLLOW"
+	CatalogPriceRebind  CatalogPriceAction = "REBIND"
 	CatalogPriceFixBase CatalogPriceAction = "FIX_BASE"
 	CatalogPriceFix     CatalogPriceAction = "FIX"
 	CatalogPriceTier    CatalogPriceAction = "TIER"
@@ -127,6 +129,7 @@ type CatalogImportStatus string
 
 const (
 	CatalogApplied  CatalogImportStatus = "applied"
+	CatalogFailed   CatalogImportStatus = "failed"
 	CatalogInvalid  CatalogImportStatus = "invalid"
 	CatalogConflict CatalogImportStatus = "conflict"
 	CatalogChanged  CatalogImportStatus = "catalogChanged"
@@ -140,9 +143,9 @@ type CatalogImportOutcome struct {
 type catalogOfferKey struct{ provider, id string }
 
 type catalogIndex struct {
-	offers               map[catalogOfferKey]*CatalogImportOffer
-	exact, byLastSegment map[string][]*CatalogImportOffer
-	providers            []string
+	offers                          map[catalogOfferKey]*CatalogImportOffer
+	exact, canonical, byLastSegment map[string][]*CatalogImportOffer
+	providers                       []string
 }
 
 func catalogLastIDSegment(id string) string {
@@ -210,7 +213,7 @@ func indexCatalog(data []byte) (*catalogIndex, error) {
 	if err := json.Unmarshal(data, &catalog); err != nil {
 		return nil, fmt.Errorf("decode model catalog: %w", err)
 	}
-	idx := &catalogIndex{offers: map[catalogOfferKey]*CatalogImportOffer{}, exact: map[string][]*CatalogImportOffer{}, byLastSegment: map[string][]*CatalogImportOffer{}, providers: sortedStringKeys(catalog.Providers)}
+	idx := &catalogIndex{offers: map[catalogOfferKey]*CatalogImportOffer{}, exact: map[string][]*CatalogImportOffer{}, canonical: map[string][]*CatalogImportOffer{}, byLastSegment: map[string][]*CatalogImportOffer{}, providers: sortedStringKeys(catalog.Providers)}
 	for _, provider := range idx.providers {
 		for _, entry := range catalog.Providers[provider].Models {
 			id := modelString(entry, "id")
@@ -249,6 +252,9 @@ func indexCatalog(data []byte) (*catalogIndex, error) {
 			offer.Identity = string(identity)
 			idx.offers[key] = offer
 			idx.exact[id] = append(idx.exact[id], offer)
+			if canonical != "" {
+				idx.canonical[canonical] = append(idx.canonical[canonical], offer)
+			}
 			suffix := catalogLastIDSegment(id)
 			idx.byLastSegment[suffix] = append(idx.byLastSegment[suffix], offer)
 		}
@@ -282,10 +288,25 @@ func preferredOffer(offers []*CatalogImportOffer) *CatalogImportOffer {
 	return official
 }
 
+// A canonical name can refer to several separately priced variants. Only use
+// it as an exact alias when all matching providers list the same raw model ID.
+func (idx *catalogIndex) matchingOffers(id string, allowCanonical bool) []*CatalogImportOffer {
+	if offers := idx.exact[id]; len(offers) > 0 || !allowCanonical {
+		return offers
+	}
+	offers := idx.canonical[id]
+	for _, offer := range offers {
+		if offer.ModelID != offers[0].ModelID || catalogLastIDSegment(offer.ModelID) != catalogLastIDSegment(id) {
+			return nil
+		}
+	}
+	return offers
+}
+
 func shareCatalogIdentity(ids []string, idx *catalogIndex) bool {
 	identity := map[string]string{}
 	for _, id := range ids {
-		offers := idx.exact[id]
+		offers := idx.matchingOffers(id, true)
 		if len(offers) == 0 {
 			return false
 		}
@@ -314,7 +335,7 @@ func catalogLocalPrices(card *objects.ModelCard) []CatalogImportLocalPrice {
 		price := CatalogImportLocalPrice{Field: ReferencePriceField(field)}
 		if card != nil {
 			binding := card.CatalogPrices[field]
-			price.Follow, price.Provider, price.ModelID = binding.Follow, binding.Provider, binding.ModelID
+			price.Follow, price.Provider, price.ModelID, price.Canonical = binding.Follow, binding.Provider, binding.ModelID, binding.Canonical
 			price.Value = card.ReferencePrice(field)
 		}
 		result = append(result, price)
@@ -346,7 +367,9 @@ func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope Catalog
 	}
 	preview, err := svc.catalogPreviewFromSnapshot(ctx, scope, snapshot)
 	if err == nil && scope.Tracked {
-		preview.Rows = slices.DeleteFunc(preview.Rows, func(row *CatalogImportRow) bool { return row.Version != "" && (!row.Changed || row.Archived) })
+		preview.Rows = slices.DeleteFunc(preview.Rows, func(row *CatalogImportRow) bool {
+			return row.Version != "" && (row.Archived || (!row.Changed && !row.needsReview))
+		})
 	}
 	return preview, err
 }
@@ -386,6 +409,9 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 	}
 	publicURL.User, publicURL.RawQuery, publicURL.Fragment, publicURL.ForceQuery = nil, "", "", false
 	preview := &CatalogImportPreview{UpstreamURL: publicURL.String(), Source: snapshot.Source, Revision: hex.EncodeToString(revision[:]), Providers: idx.providers, Rows: []*CatalogImportRow{}}
+	if !scope.Channels && !scope.Tracked && len(scope.Providers) == 0 {
+		return preview, nil
+	}
 	db := svc.entFromContext(ctx)
 	local, err := db.Model.Query().All(ctx)
 	if err != nil {
@@ -464,7 +490,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 		row := &CatalogImportRow{ModelID: id, Name: id, MergeTarget: target, MergeTargetOccupied: target != "" && importedIDs[target] != ""}
 		var candidates []*CatalogImportOffer
 		for _, alias := range slices.Compact(aliases[id]) {
-			exact := idx.exact[alias]
+			exact := idx.matchingOffers(alias, scope.IgnorePrefix)
 			var identity string
 			if len(aliases[id]) > 1 || target != "" {
 				identities := lo.Uniq(lo.Map(exact, func(o *CatalogImportOffer, _ int) string { return o.Identity }))
@@ -483,7 +509,10 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 		candidates = lo.Uniq(candidates)
 		row.Preferred = preferredOffer(candidates)
 		if scope.IgnorePrefix && len(candidates) == 0 {
-			candidates = idx.byLastSegment[catalogLastIDSegment(id)]
+			candidates = idx.canonical[id]
+			if len(candidates) == 0 {
+				candidates = idx.byLastSegment[catalogLastIDSegment(id)]
+			}
 		}
 		if m := existing[id]; m != nil {
 			row.Name, row.Developer, row.Archived = m.Name, m.Developer, m.Status == model.StatusArchived
@@ -504,7 +533,18 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 				if len(providerOffers[id]) == 0 && p.Follow {
 					row.Preferred = o
 				}
-				if r := o.rate(p.Field); p.Follow && r != nil && r.Base != nil && (p.Value == nil || *p.Value != *r.Base) {
+				if !p.Follow {
+					continue
+				}
+				rate := o.rate(p.Field)
+				if rate == nil || rate.Base == nil {
+					row.needsReview = true
+					continue
+				}
+				differentPrice := p.Value == nil || *p.Value != *rate.Base
+				if p.Canonical != o.Canonical {
+					row.needsReview = row.needsReview || p.Canonical != "" || differentPrice
+				} else if differentPrice {
 					row.Changed = true
 				}
 			}

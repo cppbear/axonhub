@@ -24,25 +24,29 @@ import {
   type ImportRow,
   type ImportSelection,
   type CatalogPreview,
-  type Outcome,
 } from '../data/catalog-import';
 import { PriceEditor, defaultSelection, selectStyle, offerKey, useReferencePriceFormat } from './models-catalog-prices';
 import { CatalogSchedule } from './models-catalog-schedule';
 
 const pageSize = 25;
 
+function requiresSource(row: ImportRow) {
+  return row.offers.length > 1 && row.offers.some((offer) =>
+    row.members.some(({ id }) => id === offer.modelID || id === offer.canonical)
+  );
+}
+
 function PreviewRows({
   preview: latest,
-  scope,
-  onApplied,
+  applying,
+  onApply,
 }: {
   preview: CatalogPreview;
-  scope: ImportScope;
-  onApplied: (outcomes: Outcome[]) => void;
+  applying: boolean;
+  onApply: (revision: string, selections: ImportSelection[]) => void;
 }) {
   const { t } = useTranslation();
   const formatPrice = useReferencePriceFormat();
-  const apply = useCatalogApply();
   const [search, setSearch] = useState('');
   const query = useDebounce(search, 200);
   const [filter, setFilter] = useState('all');
@@ -51,7 +55,6 @@ function PreviewRows({
   const [edits, setEdits] = useState<Record<string, ImportSelection>>({});
   const [merged, setMerged] = useState<ImportRow[]>([]);
   const [expanded, setExpanded] = useState('');
-  const [error, setError] = useState('');
   const [preview, setPreview] = useState(latest);
   useEffect(() => {
     if (selected.size === 0 && !Object.keys(edits).length && !merged.length) setPreview(latest);
@@ -82,9 +85,10 @@ function PreviewRows({
   const ready =
     choices.length > 0 &&
     choices.every(
-      (r) =>
+      (r, i) =>
         r.routes.every((route) => route.request !== undefined) &&
         (r.version || r.type) &&
+        (r.version || r.provider || !requiresSource(chosen[i])) &&
         r.name.trim() &&
         r.developer.trim() &&
         (!r.version || r.prices.length > 0)
@@ -117,21 +121,15 @@ function PreviewRows({
   };
   const currentPage = Math.min(page, Math.max(0, Math.ceil(filtered.length / pageSize) - 1));
   const visible = filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
-  const applySelected = async () => {
-    setError('');
-    try {
-      const results = await apply.mutateAsync({ scope, revision: preview.revision, selections: choices });
-      onApplied(results);
-      setSelected(new Set());
-      setEdits({});
-      setMerged([]);
-      setExpanded('');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
+  function applySelected() {
+    onApply(preview.revision, choices);
+    setSelected(new Set());
+    setEdits({});
+    setMerged([]);
+    setExpanded('');
+  }
   return (
-    <div className='flex min-h-0 flex-1 flex-col gap-2'>
+    <fieldset disabled={applying} className='flex min-h-0 min-w-0 flex-1 flex-col gap-2'>
       <div className='flex flex-wrap gap-2'>
         <Input
           className='min-w-32 flex-1'
@@ -263,7 +261,7 @@ function PreviewRows({
             ›
           </Button>
         </div>
-        <Button data-testid='catalog-import-apply' disabled={!ready || apply.isPending} onClick={applySelected}>
+        <Button data-testid='catalog-import-apply' disabled={!ready} onClick={applySelected}>
           {t('models.import.apply', { count: selected.size })}
         </Button>
       </div>
@@ -272,12 +270,7 @@ function PreviewRows({
           {t('models.import.completeRows')}
         </p>
       )}
-      {error && (
-        <p role='alert' className='text-destructive text-sm'>
-          {error}
-        </p>
-      )}
-    </div>
+    </fieldset>
   );
 }
 
@@ -289,7 +282,8 @@ export function ModelsCatalogImport() {
   const [mode, setMode] = useState('channels');
   const [provider, setProvider] = useState('');
   const [ignorePrefix, setIgnorePrefix] = useState(false);
-  const [outcomes, setOutcomes] = useState<Outcome[]>([]);
+  const apply = useCatalogApply();
+  const outcomes = apply.data ?? [];
   const schedule = status.data?.settings;
   const scope = useMemo<ImportScope>(
     () => ({
@@ -300,9 +294,12 @@ export function ModelsCatalogImport() {
     }),
     [mode, provider, ignorePrefix, schedule]
   );
-  const preview = useCatalogPreview(scope);
-  const [isSchedule, setIsSchedule] = useState(false);
+  const canImport = hasSystemScope('write_channels');
+  const [showSchedule, setIsSchedule] = useState(false);
+  const isSchedule = !canImport || showSchedule;
+  const preview = useCatalogPreview(scope, !isSchedule);
   const data = preview.data;
+  const refreshingAfterError = apply.isError && preview.fetchStatus !== 'idle';
   return (
     <Dialog
       open
@@ -312,8 +309,8 @@ export function ModelsCatalogImport() {
     >
       <DialogContent className='flex h-[min(85dvh,52rem)] max-h-[95dvh] flex-col overflow-hidden sm:max-w-4xl'>
         <DialogHeader>
-          <DialogTitle>{t('models.import.title')}</DialogTitle>
-          <DialogDescription>{t('models.import.description')}</DialogDescription>
+          <DialogTitle>{t(isSchedule ? 'models.import.schedule' : 'models.import.title')}</DialogTitle>
+          <DialogDescription>{t(isSchedule ? 'models.import.checkHint' : 'models.import.description')}</DialogDescription>
         </DialogHeader>
         <div className='flex flex-wrap items-center gap-2'>
           {!isSchedule && (
@@ -323,7 +320,7 @@ export function ModelsCatalogImport() {
               value={mode}
               onChange={(e) => {
                 setMode(e.target.value);
-                setOutcomes([]);
+                apply.reset();
               }}
             >
               {['channels', 'provider', 'watch'].map((m) => (
@@ -340,7 +337,7 @@ export function ModelsCatalogImport() {
               value={provider}
               onChange={(e) => {
                 setProvider(e.target.value);
-                setOutcomes([]);
+                apply.reset();
               }}
             >
               <option value=''>{t('models.import.pickProvider')}</option>
@@ -355,20 +352,21 @@ export function ModelsCatalogImport() {
               {t('models.import.ignorePrefix')}
             </label>
           )}
-          <Button size='sm' variant='outline' className='ms-auto' onClick={() => setIsSchedule(!isSchedule)}>
-            {t(isSchedule ? 'models.import.preview' : 'models.import.schedule')}
-          </Button>
+          {canImport && (
+            <Button size='sm' variant='outline' className='ms-auto' onClick={() => setIsSchedule(!isSchedule)}>
+              {t(isSchedule ? 'models.import.preview' : 'models.import.schedule')}
+            </Button>
+          )}
         </div>
         {isSchedule && status.data && (
           <CatalogSchedule
             key={JSON.stringify(status.data.settings)}
             status={status.data}
-            providers={data?.providers ?? []}
             canWrite={hasSystemScope('write_settings')}
-            onReview={() => {
+            onReview={canImport ? () => {
               setMode('watch');
               setIsSchedule(false);
-            }}
+            } : undefined}
           />
         )}
         {isSchedule && status.error && <p role='alert'>{status.error.message}</p>}
@@ -386,14 +384,31 @@ export function ModelsCatalogImport() {
                   ))}
               </div>
             )}
-            {preview.isPending && <p>{t('common.loading')}</p>}
-            {preview.error && <p role='alert'>{preview.error.message}</p>}
-            {data && (
+            {apply.error && (
+              <p role='alert' className='text-destructive text-sm'>
+                {t('models.import.unknownResult')} {apply.error.message}
+              </p>
+            )}
+            {(preview.isPending || apply.isPending || refreshingAfterError) && <p>{t('common.loading')}</p>}
+            {preview.error && (
+              <div role='alert'>
+                {preview.error.message}
+                <Button data-testid='catalog-import-reload' variant='outline' size='sm' onClick={() => preview.refetch()}>
+                  {t('models.import.preview')}
+                </Button>
+              </div>
+            )}
+            {data && !preview.error && !refreshingAfterError && (
               <>
                 <p className='text-muted-foreground text-xs break-all'>
                   {t('models.import.' + (data.source === 'fallback' ? 'fallback' : 'source'))} · {data.upstreamURL}
                 </p>
-                <PreviewRows key={JSON.stringify(scope)} preview={data} scope={scope} onApplied={setOutcomes} />
+                <PreviewRows
+                  key={JSON.stringify(scope)}
+                  preview={data}
+                  applying={apply.isPending}
+                  onApply={(revision, selections) => apply.mutate({ scope, revision, selections })}
+                />
               </>
             )}
           </>

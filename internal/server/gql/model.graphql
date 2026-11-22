@@ -280,6 +280,7 @@ type CatalogImportOffer {
   developer: String!
   type: String!
   identity: String!
+  canonical: String!
   rates: [CatalogImportRate!]!
 }
 
@@ -287,6 +288,7 @@ type CatalogImportLocalPrice {
   field: ReferencePriceField!
   value: Float
   follow: Boolean!
+  canonical: String!
   provider: String!
   modelID: String!
 }
@@ -320,7 +322,7 @@ type CatalogImportPreview {
   rows: [CatalogImportRow!]!
 }
 
-enum CatalogPriceAction { FOLLOW FIX FIX_BASE TIER }
+enum CatalogPriceAction { FOLLOW REBIND FIX FIX_BASE TIER }
 input CatalogImportPriceInput {
   field: ReferencePriceField!
   action: CatalogPriceAction!
@@ -344,7 +346,7 @@ input CatalogImportSelection {
   type: String!
   prices: [CatalogImportPriceInput!]!
 }
-enum CatalogImportStatus { applied invalid conflict catalogChanged }
+enum CatalogImportStatus { applied invalid conflict catalogChanged failed }
 type CatalogImportOutcome {
   modelID: String!
   status: CatalogImportStatus!

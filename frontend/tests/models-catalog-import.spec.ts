@@ -4,7 +4,7 @@
 //   frontend/src/features/models/components/models-catalog-prices.tsx
 //   frontend/src/features/models/data/catalog-import.ts
 // 注意事项:
-//   仅替换目录预览与应用响应，避免修改测试站点已有模型。
+//   导入提交使用隔离响应，角色场景使用独立浏览器上下文。
 import { expect, test } from '@playwright/test';
 import { gotoAndEnsureAuth } from './auth.utils';
 
@@ -85,7 +85,7 @@ test('a filtered batch keeps the quotes originally reviewed across a background 
 });
 
 test('reference prices show the bound source and distinguish missing from unselected quotes', async ({ page }) => {
-  const details = { name: 'Model', developer: 'dev', identity: 'v1', type: 'chat' };
+  const details = { name: 'Model', developer: 'dev', identity: 'v1', canonical: 'dev/current', type: 'chat' };
   const rate = (field: string, base: number | null) => ({ field, base, tiers: [] });
   const providerA = { ...details, provider: 'provider-a', modelID: 'mixed', rates: [rate('input', 1)] };
   const providerB = { ...details, provider: 'provider-b', modelID: 'mixed', rates: [rate('input', 9), rate('output', 20), rate('cacheRead', 5)] };
@@ -97,8 +97,8 @@ test('reference prices show the bound source and distinguish missing from unsele
     {
       ...row('mixed'), version: 'saved', changed: true, offers: [providerA, providerB], preferred: providerB,
       prices: [
-        { field: 'input', value: 1, follow: true, provider: 'provider-a', modelID: 'mixed' },
-        { field: 'output', value: 15, follow: true, provider: 'provider-b', modelID: 'mixed' },
+        { field: 'input', value: 1, follow: true, provider: 'provider-a', modelID: 'mixed', canonical: 'dev/previous' },
+        { field: 'output', value: 15, follow: true, provider: 'provider-b', modelID: 'mixed', canonical: 'dev/current' },
         { field: 'cacheRead', value: 3, follow: true, provider: 'removed', modelID: 'mixed' },
       ],
     },
@@ -107,12 +107,18 @@ test('reference prices show the bound source and distinguish missing from unsele
       { modelID: 'zero', rates: [rate('input', 0)] },
       { modelID: 'tiers-only', rates: [{ field: 'input', base: null, tiers: [{ label: 'context 256000', value: 2.5 }] }] },
     ].map(({ modelID, rates }) => {
-      const offer = { ...providerA, modelID, rates };
+      const offer = { ...providerA, modelID, rates, type: 'embedding', name: 'Vector embedding' };
       return { ...row(modelID), offers: [offer], preferred: offer, prices: [] };
     }),
   ];
+  let applied: unknown[] = [];
   await page.route('**/admin/graphql', (route) => {
-    if (route.request().postDataJSON().operationName !== 'CatalogImportPreview') return route.fallback();
+    const body = route.request().postDataJSON();
+    if (body.operationName === 'ApplyCatalogImport') {
+      applied = body.variables.selections;
+      return route.fulfill({ json: { data: { applyCatalogImport: [{ modelID: 'zero', status: 'applied' }] } } });
+    }
+    if (body.operationName !== 'CatalogImportPreview') return route.fallback();
     const preview = { rows: previews, providers: [], source: 'upstream', upstreamURL: 'https://example.test', revision: 'same' };
     return route.fulfill({ json: { data: { catalogImportPreview: preview } } });
   });
@@ -121,17 +127,86 @@ test('reference prices show the bound source and distinguish missing from unsele
   const expand = (id: string) => page.getByTestId('catalog-import-expand-' + id);
   await expand('mixed').click();
   const quote = (field: string) => page.getByTestId('catalog-price-row-' + field).getByRole('cell').nth(1);
+  await expect(quote('input')).toContainText('dev/previous');
+  await expect(quote('input')).toContainText('dev/current');
   await expect(quote('input')).toContainText('$1');
   await expect(quote('output')).toContainText('$20');
   await expect(quote('cacheRead')).toContainText('—');
   const inputAction = page.getByTestId('catalog-price-action-input');
   const fromB = inputAction.locator('optgroup[label="provider-b · mixed"] option').first();
+  await expect(inputAction).toHaveValue('-1');
+  await expect(fromB).toContainText(/Confirm source|确认来源/);
   await inputAction.selectOption(await fromB.getAttribute('value') as string);
   await expect(quote('input')).toContainText('$9');
   await expect(expand('no-rates')).toContainText(/No reference prices available|暂无参考价/);
   await expect(expand('tiers-only')).toContainText(/No reference prices selected|未选用参考价/);
   await expect(expand('zero')).toContainText('$0');
   await expand('zero').click();
-  await page.getByTestId('catalog-price-action-input').selectOption('-1');
+  await page.getByTestId('catalog-details-only').click();
   await expect(expand('zero')).toContainText(/No reference prices selected|未选用参考价/);
+  await page.getByRole('checkbox', { name: 'zero', exact: true }).click();
+  await page.getByTestId('catalog-import-apply').click();
+  await expect.poll(() => applied).toEqual([expect.objectContaining({
+    modelID: 'zero', provider: 'provider-a', sourceModelID: 'zero', identity: 'v1',
+    type: 'embedding', name: 'Vector embedding', prices: [],
+  })]);
+});
+
+test('site settings roles can open the schedule without an import preview', async ({ page }) => {
+  let importReads = 0;
+  let scopes = ['read_channels', 'read_settings'];
+  await page.route('**/admin/graphql', async (route) => {
+    const { operationName } = route.request().postDataJSON();
+    if (operationName === 'CatalogImportPreview') importReads++;
+    if (operationName === 'MyProjects') return route.fulfill({ json: { data: { myProjects: [] } } });
+    if (operationName !== 'Me') return route.fallback();
+    const response = await route.fetch();
+    const json = await response.json();
+    Object.assign(json.data.me, { isOwner: false, scopes, projects: [], preferLanguage: scopes.includes('write_settings') ? 'zh-CN' : 'en' });
+    return route.fulfill({ json });
+  });
+  await gotoAndEnsureAuth(page, '/models');
+  const open = page.getByTestId('catalog-import-open');
+  await open.click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('button', { name: /Check now|立即检查/i })).toHaveCount(0);
+  await expect(dialog.getByRole('heading', { name: 'Update checks' })).toBeVisible();
+  await expect(dialog.locator('input[type=time]')).toBeDisabled();
+  scopes = [...scopes, 'write_settings'];
+  await page.reload();
+  await open.click();
+  await expect(dialog.getByRole('heading', { name: '检查更新' })).toBeVisible();
+  await expect(dialog.locator('input[type=time]')).toBeEnabled();
+  expect(importReads).toBe(0);
+});
+
+test('a lost apply response requires a refreshed preview before retrying', async ({ page }) => {
+  let online = true;
+  let submissions = 0;
+  await page.route('**/admin/graphql', async (route) => {
+    const { operationName } = route.request().postDataJSON();
+    if (operationName === 'ApplyCatalogImport') {
+      submissions++;
+      online = false;
+      return route.abort();
+    }
+    if (operationName !== 'CatalogImportPreview') return route.fallback();
+    if (!online) return route.fulfill({ json: { errors: [{ message: 'Preview temporarily unavailable' }] } });
+    const offer = { provider: 'dev', modelID: 'item', name: 'Item', developer: 'dev', type: 'chat', canonical: '', identity: '', rates: [] };
+    const row = { ...offer, version: '', members: [{ id: 'item', identity: '' }], routes: [], offers: [offer], preferred: offer, prices: [] };
+    const preview = { rows: submissions ? [] : [row], providers: ['dev'], source: 'upstream', upstreamURL: 'example', revision: 'mirror' };
+    return route.fulfill({ json: { data: { catalogImportPreview: preview } } });
+  });
+  await gotoAndEnsureAuth(page, '/models');
+  await page.getByTestId('catalog-import-open').click();
+  await page.getByTestId('catalog-import-select-all').click();
+  await page.getByTestId('catalog-import-apply').click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText(/result could not be confirmed|无法确认提交结果/)).toBeVisible();
+  await expect(dialog.getByText('Preview temporarily unavailable', { exact: false })).toBeVisible();
+  await expect(dialog.getByTestId('catalog-import-apply')).toHaveCount(0);
+  online = true;
+  await dialog.getByTestId('catalog-import-reload').click();
+  await expect(dialog.getByTestId('catalog-import-apply')).toBeDisabled();
+  expect(submissions).toBe(1);
 });

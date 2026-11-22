@@ -270,8 +270,10 @@ func (r *queryResolver) CatalogImportPreview(ctx context.Context, scope biz.Cata
 
 // CatalogCheckStatus is the resolver for the catalogCheckStatus field.
 func (r *queryResolver) CatalogCheckStatus(ctx context.Context) (*biz.CatalogCheckStatus, error) {
-	if err := authz.RequireSystemUserScope(ctx, scopes.ScopeWriteChannels); err != nil {
-		return nil, err
+	if !scopes.UserHasScope(ctx, scopes.ScopeReadSettings) {
+		if err := authz.RequireSystemUserScope(ctx, scopes.ScopeWriteChannels); err != nil {
+			return nil, err
+		}
 	}
 	return r.modelService.CatalogCheckStatus(ctx)
 }

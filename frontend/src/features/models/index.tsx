@@ -106,15 +106,15 @@ function BulkAddButton() {
   );
 }
 
-function CatalogImportButton() {
+function CatalogImportButton({ canImport }: { canImport: boolean }) {
   const { t } = useTranslation();
   const { setOpen } = useModels();
   const { data } = useCatalogCheckStatus();
   return (
     <Button variant='outline' className='shrink-0' onClick={() => setOpen('catalogImport')} data-testid='catalog-import-open'>
       <IconDownload className='mr-2 h-4 w-4' />
-      {t('models.import.title')}
-      {data?.lastSuccess && data.available + data.changed > 0 && (
+      {t(canImport ? 'models.import.title' : 'models.import.schedule')}
+      {canImport && data?.lastSuccess && data.available + data.changed > 0 && (
         <span className='rounded-full bg-muted px-2 text-xs' title={t('models.import.lastCounts', { available: data.available, changed: data.changed })}>{data.available + data.changed}</span>
       )}
     </Button>
@@ -146,6 +146,8 @@ function DetectUnassociatedButton() {
 }
 
 function ActionButtons() {
+  const { hasSystemScope } = usePermissions();
+  const canImport = hasSystemScope('write_channels');
   const scrollRef = useHorizontalScroll<HTMLDivElement>();
   return (
     <div ref={scrollRef} onFocusCapture={revealFocusedHorizontalButton} data-testid='model-actions-scroller' className='flex min-w-0 max-w-full gap-2 overflow-x-auto p-1'>
@@ -153,11 +155,11 @@ function ActionButtons() {
         <>
           <DetectUnassociatedButton />
           <SettingsButton />
-          <PermissionGuard requiredSystemScope='write_channels'><CatalogImportButton /></PermissionGuard>
           <BulkAddButton />
           <CreateButton />
         </>
       </PermissionGuard>
+      {(canImport || hasSystemScope('read_settings')) && <CatalogImportButton canImport={canImport} />}
     </div>
   );
 }

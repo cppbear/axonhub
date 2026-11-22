@@ -1,5 +1,6 @@
 // 职责: 管理每日模型检查的站点时间和服务商范围，展示最近一次检查结果。
 // 关联文件:
+//   frontend/src/features/models/data/providers.ts
 //   frontend/src/features/models/data/catalog-import.ts
 //   frontend/src/features/models/components/models-catalog-import.tsx
 //   frontend/src/locales/en.json
@@ -11,18 +12,17 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
+import { useProvidersData } from '../data/providers';
 import { useSaveCatalogSchedule, useCheckCatalogNow, type CheckStatus } from '../data/catalog-import';
 
 export function CatalogSchedule({
   status,
-  providers,
   canWrite,
   onReview,
 }: {
   status: CheckStatus;
-  providers: string[];
   canWrite: boolean;
-  onReview: () => void;
+  onReview?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const [draft, setDraft] = useState(() => ({
@@ -32,10 +32,11 @@ export function CatalogSchedule({
   const [search, setSearch] = useState('');
   const save = useSaveCatalogSchedule();
   const check = useCheckCatalogNow();
+  const { data } = useProvidersData();
   const error = save.error ?? check.error;
   const formatTime = (value: string | null) =>
     value ? new Date(value).toLocaleString(i18n.language, { timeZone: status.settings.timezone || undefined, timeZoneName: 'short' }) : '—';
-  const providerOptions = [...new Set([...providers, ...draft.providers])]
+  const providerOptions = [...new Set([...Object.keys(data.providers), ...draft.providers])]
     .sort()
     .filter((id) => id.toLowerCase().includes(search.toLowerCase()));
   return (
@@ -55,14 +56,16 @@ export function CatalogSchedule({
           ))}
         </dl>
         {status.failed && <p role='status'>{t('models.import.checkFailed')}</p>}
-        <div className='flex flex-wrap gap-2'>
-          <Button size='sm' variant='outline' disabled={check.isPending} onClick={() => check.mutate()}>
-            {t('models.import.checkNow')}
-          </Button>
-          <Button size='sm' variant='outline' onClick={onReview}>
-            {t('models.import.reviewWatch')}
-          </Button>
-        </div>
+        {onReview && (
+          <div className='flex flex-wrap gap-2'>
+            <Button size='sm' variant='outline' disabled={check.isPending} onClick={() => check.mutate()}>
+              {t('models.import.checkNow')}
+            </Button>
+            <Button size='sm' variant='outline' onClick={onReview}>
+              {t('models.import.reviewWatch')}
+            </Button>
+          </div>
+        )}
       </section>
       <fieldset disabled={!canWrite || save.isPending} className='space-y-3 border-t pt-4'>
         <label className='flex items-center gap-2 font-medium'>
@@ -73,7 +76,6 @@ export function CatalogSchedule({
           />
           {t('models.import.daily')}
         </label>
-        <p className='text-muted-foreground'>{t('models.import.checkHint')}</p>
         <div className='flex flex-wrap gap-3'>
           <label>
             {t('models.import.time')}

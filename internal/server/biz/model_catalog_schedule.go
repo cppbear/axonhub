@@ -18,8 +18,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/aptible/supercronic/cronexpr"
-
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/system"
@@ -53,7 +51,7 @@ type catalogCheckResult struct {
 	ScheduledDay       string `json:",omitempty"`
 }
 
-func (s CatalogCheckSettings) next(now time.Time) (time.Time, error) {
+func (s CatalogCheckSettings) next(now time.Time, scheduledDay string) (time.Time, error) {
 	at, err := time.Parse("15:04", s.Time)
 	if err != nil {
 		return time.Time{}, xerrors.ValidationError("catalog check time must be in HH:MM format")
@@ -65,11 +63,15 @@ func (s CatalogCheckSettings) next(now time.Time) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, xerrors.ValidationError("unknown catalog check timezone")
 	}
-	rule, err := cronexpr.Parse(fmt.Sprintf("%d %d * * *", at.Minute(), at.Hour()))
-	if err != nil {
-		return time.Time{}, err
+	// Use the same occurrence for both the minute sweep and the displayed next
+	// check. Date may normalize a nonexistent wall time across a DST gap.
+	local := now.In(zone)
+	for day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC); ; day = day.AddDate(0, 0, 1) {
+		candidate := time.Date(day.Year(), day.Month(), day.Day(), at.Hour(), at.Minute(), 0, 0, zone)
+		if day.Format(time.DateOnly) != scheduledDay && candidate.After(now) && candidate.Day() == day.Day() && candidate.Hour() == at.Hour() && candidate.Minute() == at.Minute() {
+			return candidate, nil
+		}
 	}
-	return rule.Next(now.In(zone)), nil
 }
 
 func (svc *ModelService) CatalogCheckStatus(ctx context.Context) (*CatalogCheckStatus, error) {
@@ -104,7 +106,7 @@ func (svc *ModelService) readCatalogCheck(ctx context.Context) (*CatalogCheckSta
 	// The counts and timestamps describe the last completed check, including after scope changes.
 	state.Settings = settings
 	if settings.Enabled {
-		next, err := settings.next(time.Now())
+		next, err := settings.next(time.Now(), state.ScheduledDay)
 		if err != nil {
 			return nil, "", err
 		}
@@ -114,7 +116,7 @@ func (svc *ModelService) readCatalogCheck(ctx context.Context) (*CatalogCheckSta
 }
 
 func (svc *ModelService) SaveCatalogCheckSettings(ctx context.Context, settings CatalogCheckSettings) (*CatalogCheckStatus, error) {
-	if _, err := settings.next(time.Now()); err != nil {
+	if _, err := settings.next(time.Now(), ""); err != nil {
 		return nil, err
 	}
 	slices.Sort(settings.Providers)
@@ -174,12 +176,12 @@ func (svc *ModelService) claimCatalogCheck(ctx context.Context, now time.Time, s
 					return nil
 				}
 				minute := now.Truncate(time.Minute)
-				due, err := state.Settings.next(minute.Add(-time.Minute))
+				due, err := state.Settings.next(minute.Add(-time.Minute), state.ScheduledDay)
 				if err != nil {
 					return err
 				}
 				day := due.Format(time.DateOnly)
-				if !due.Equal(minute) || state.ScheduledDay == day {
+				if !due.Equal(minute) {
 					return nil
 				}
 				state.ScheduledDay = day

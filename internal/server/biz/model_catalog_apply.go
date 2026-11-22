@@ -22,15 +22,21 @@ import (
 
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqljson"
+	"github.com/google/uuid"
 	"github.com/samber/lo"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
+	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/model"
+	"github.com/looplj/axonhub/internal/ent/system"
+	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xerrors"
+	"github.com/looplj/axonhub/llm"
 )
 
 var errCatalogConflict = errors.New("model changed since preview")
@@ -90,7 +96,11 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 			case errors.Is(err, errCatalogConflict), ent.IsConstraintError(err), ent.IsNotFound(err), catalogWriteBusy(err):
 				status = CatalogConflict
 			case err != nil:
-				return result, fmt.Errorf("apply catalog model %q: %w", selection.ModelID, err)
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				log.Error(ctx, "failed to import catalog model", log.String("model_id", selection.ModelID), log.Cause(err))
+				status = CatalogFailed
 			}
 		}
 		if status == CatalogApplied {
@@ -127,7 +137,7 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, row
 		return errCatalogConflict
 	}
 	choices := map[catalogOfferKey]*CatalogImportOffer{}
-	var channelIDs []int
+	reviewedChannels := map[int]bool{}
 	memberCount := 0
 	for _, row := range parts {
 		if row.Version != "" || (row.ModelID != sel.ModelID && row.MergeTargetOccupied) {
@@ -147,7 +157,7 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, row
 			choices[catalogOfferKey{o.Provider, o.ModelID}] = o
 		}
 		for _, route := range row.Routes {
-			channelIDs = append(channelIDs, route.ChannelID)
+			reviewedChannels[route.ChannelID] = true
 		}
 	}
 	if memberCount != len(sel.Members) || (len(parts) > 1 && rows[sel.ModelID] != nil && !slices.Contains(parts, rows[sel.ModelID])) {
@@ -158,18 +168,36 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, row
 		return errCatalogSelection
 	}
 	primary := choices[catalogOfferKey{sel.Provider, sel.SourceModelID}]
+	if len(choices) > 1 && sel.Provider == "" {
+		for _, offer := range choices {
+			_, byID := submitted[offer.ModelID]
+			_, byCanonical := submitted[offer.Canonical]
+			if byID || byCanonical {
+				return errCatalogSelection
+			}
+		}
+	}
 	if sel.Provider != "" && (primary == nil || primary.Identity != sel.Identity) {
 		return errCatalogQuoteChanged
 	}
 	card := newImportCard(primary)
+	ids := sortedStringKeys(submitted)
 	if len(sel.Members) > 1 {
-		card.CatalogAliases = sortedStringKeys(submitted)
+		card.CatalogAliases = ids
 	}
 	if err := applyCatalogPrices(card, choices, sel.Prices); err != nil {
 		return err
 	}
 	settings := &objects.ModelSettings{LoadBalancerStrategy: "default", TraceStickyMode: "default"}
-	associations, err := catalogAssociations(ctx, db, sel, channelIDs)
+	for _, choice := range sel.Routes {
+		if _, present := submitted[choice.Actual]; !present || !reviewedChannels[choice.ChannelID] {
+			return errCatalogConflict
+		}
+	}
+	if err := claimCatalogModelIDs(ctx, db, lo.Uniq(append(ids, sel.ModelID))); err != nil {
+		return err
+	}
+	associations, err := catalogAssociations(ctx, db, sel)
 	if err != nil {
 		return err
 	}
@@ -223,15 +251,46 @@ func (svc *ModelService) updateCatalogPrices(ctx context.Context, source string,
 	return db.Model.UpdateOneID(current.ID).SetModelCard(&next).Exec(ctx)
 }
 
+// Serialize catalog creates before checking both model IDs and aliases stored in JSON.
+func claimCatalogModelIDs(ctx context.Context, db *ent.Client, ids []string) error {
+	_, err := authz.RunAsHost(ctx, db, "serialize-catalog-import", func(hostCtx context.Context) (struct{}, error) {
+		return struct{}{}, db.System.Create().SetKey("model_catalog_import_lock").SetValue(uuid.NewString()).
+			OnConflictColumns(system.FieldKey).UpdateValue().Exec(hostCtx)
+	})
+	if err != nil {
+		return fmt.Errorf("claim catalog import: %w", err)
+	}
+	query := db.Model.Query().Where(func(s *sql.Selector) {
+		predicates := []*sql.Predicate{sql.In(s.C(model.FieldModelID), lo.ToAnySlice(ids)...)}
+		for _, id := range ids {
+			predicates = append(predicates, sqljson.ValueContains(s.C(model.FieldModelCard), id, sqljson.Path("catalogAliases")))
+		}
+		s.Where(sql.Or(predicates...))
+		if db.Driver().Dialect() == dialect.MySQL {
+			s.ForUpdate()
+		}
+	})
+	occupied, err := query.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("check catalog model IDs: %w", err)
+	}
+	if occupied {
+		return errCatalogConflict
+	}
+	return nil
+}
+
 // Resolve each reviewed (channel, upstream model) against its currently exposed request names.
-func catalogAssociations(ctx context.Context, db *ent.Client, sel CatalogImportSelection, channelIDs []int) ([]*objects.ModelAssociation, error) {
+func catalogAssociations(ctx context.Context, db *ent.Client, sel CatalogImportSelection) ([]*objects.ModelAssociation, error) {
 	type key struct {
 		channel int
 		actual  string
 	}
 	choices := map[key]string{}
+	channelIDs := make([]int, 0, len(sel.Routes))
 	for _, choice := range sel.Routes {
 		choices[key{choice.ChannelID, choice.Actual}] = choice.Request
+		channelIDs = append(channelIDs, choice.ChannelID)
 	}
 	if len(choices) != len(sel.Routes) {
 		return nil, errCatalogConflict
@@ -251,14 +310,11 @@ func catalogAssociations(ctx context.Context, db *ent.Client, sel CatalogImportS
 	associations := []*objects.ModelAssociation{}
 	for _, member := range sel.Members {
 		routes := current[member.ID]
-		if len(routes) == 0 {
-			associations = append(associations, &objects.ModelAssociation{Type: "model", ModelID: &objects.ModelIDAssociation{ModelID: member.ID}})
-		}
 		for _, route := range routes {
 			k := key{route.ChannelID, route.Actual}
 			request, ok := choices[k]
 			if !ok {
-				return nil, errCatalogConflict
+				continue
 			}
 			delete(choices, k)
 			if request == "" && len(route.Requests) == 0 {
@@ -300,8 +356,13 @@ func applyCatalogPrices(card *objects.ModelCard, offers map[catalogOfferKey]*Cat
 		}
 		value := rate.Base
 		switch a.Action {
-		case CatalogPriceFollow, CatalogPriceFixBase:
-		// Use the reviewed base rate.
+		case CatalogPriceFollow:
+			binding := card.CatalogPrices[string(a.Field)]
+			if binding.Follow && (binding.Provider != a.Provider || binding.ModelID != a.ModelID || binding.Canonical != offer.Canonical) {
+				return errCatalogQuoteChanged
+			}
+		case CatalogPriceRebind, CatalogPriceFixBase:
+			// Explicitly adopt this reviewed base rate.
 		case CatalogPriceTier:
 			value = nil
 			for _, tier := range rate.Tiers {
@@ -317,7 +378,7 @@ func applyCatalogPrices(card *objects.ModelCard, offers map[catalogOfferKey]*Cat
 			return errCatalogQuoteChanged
 		}
 		*dst = *value
-		card.CatalogPrices[string(a.Field)] = objects.CatalogPrice{Provider: a.Provider, ModelID: a.ModelID, Follow: a.Action == CatalogPriceFollow}
+		card.CatalogPrices[string(a.Field)] = objects.CatalogPrice{Provider: a.Provider, ModelID: a.ModelID, Canonical: offer.Canonical, Follow: a.Action == CatalogPriceFollow || a.Action == CatalogPriceRebind}
 	}
 	return nil
 }
@@ -359,7 +420,11 @@ func newImportCard(o *CatalogImportOffer) *objects.ModelCard {
 	card.ReleaseDate, card.LastUpdated = metadata.ReleaseDate, metadata.LastUpdated
 	for _, option := range metadata.ReasoningOptions {
 		if option.Type == "effort" {
-			card.ReasoningEfforts = option.Values
+			for _, effort := range []string{llm.ReasoningEffortNone, llm.ReasoningEffortMinimal, llm.ReasoningEffortLow, llm.ReasoningEffortMedium, llm.ReasoningEffortHigh, llm.ReasoningEffortXHigh, llm.ReasoningEffortMax} {
+				if slices.Contains(option.Values, effort) {
+					card.ReasoningEfforts = append(card.ReasoningEfforts, effort)
+				}
+			}
 			break
 		}
 	}

@@ -3,7 +3,7 @@ import { graphqlRequest } from '@/gql/graphql';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useErrorHandler } from '@/hooks/use-error-handler';
-import { Model, ModelConnection, CreateModelInput, UpdateModelInput, modelConnectionSchema, modelSchema, referencePriceFields, type ReferencePriceField } from './schema';
+import { ModelConnection, CreateModelInput, UpdateModelInput, modelConnectionSchema, referencePriceFields, type ReferencePriceField } from './schema';
 
 const MODELS_QUERY = `
   query GetModels(
@@ -138,134 +138,28 @@ const MODELS_QUERY = `
   }
 `;
 
-const MODEL_MUTATION_FIELDS = `
-  fragment ModelMutationFields on Model {
-    id
-    createdAt
-    updatedAt
-    missingReferencePrices
-    developer
-    modelID
-    icon
-    type
-    name
-    group
-    modelCard {
-      reasoning {
-        supported
-        default
-      }
-      reasoningEfforts
-      toolCall
-      temperature
-      modalities {
-        input
-        output
-      }
-      vision
-      cost {
-        input
-        output
-        cacheRead
-        cacheWrite
-      }
-      limit {
-        context
-        output
-      }
-      knowledge
-      releaseDate
-      lastUpdated
-    }
-    settings {
-      disableDeveloperSettingsInheritance
-      loadBalancerStrategy
-      traceStickyMode
-      associations {
-        type
-        priority
-        disabled
-        when {
-          enabled
-          condition {
-            type
-            logic
-            field
-            operator
-            value
-            conditions {
-              type
-              logic
-              field
-              operator
-              value
-              conditions {
-                type
-                logic
-                field
-                operator
-                value
-              }
-            }
-          }
-        }
-        channelModel {
-          channelId
-          modelId
-        }
-        channelRegex {
-          channelId
-          pattern
-        }
-        regex {
-          pattern
-          exclude {
-            channelNamePattern
-            channelIds
-            channelTags
-          }
-        }
-        modelId {
-          modelId
-          exclude {
-            channelNamePattern
-            channelIds
-            channelTags
-          }
-        }
-      }
-    }
-    status
-    remark
-    associatedChannelCount
-  }
-`;
-
 const CREATE_MODEL_MUTATION = `
   mutation CreateModel($input: CreateModelInput!, $editedPrices: [ManualPriceEdit!]) {
     createModel(input: $input, editedPrices: $editedPrices) {
-      ...ModelMutationFields
+      id
     }
   }
-  ${MODEL_MUTATION_FIELDS}
 `;
 
 const BULK_CREATE_MODELS_MUTATION = `
   mutation BulkCreateModels($inputs: [CreateModelInput!]!) {
     bulkCreateModels(inputs: $inputs) {
-      ...ModelMutationFields
+      id
     }
   }
-  ${MODEL_MUTATION_FIELDS}
 `;
 
 const UPDATE_MODEL_MUTATION = `
   mutation UpdateModel($id: ID!, $input: UpdateModelInput!, $editedPrices: [ManualPriceEdit!], $expectedVersion: String) {
     updateModel(id: $id, input: $input, editedPrices: $editedPrices, expectedVersion: $expectedVersion) {
-      ...ModelMutationFields
+      id
     }
   }
-  ${MODEL_MUTATION_FIELDS}
 `;
 
 const DELETE_MODEL_MUTATION = `
@@ -349,8 +243,7 @@ export function useCreateModel() {
   return useMutation({
     mutationFn: async (input: CreateModelInput) => {
       const editedPrices = referencePriceFields.filter((field) => input.modelCard.cost?.[field] == null).map((field) => ({ field, missing: true }));
-      const data = await graphqlRequest<{ createModel: Model }>(CREATE_MODEL_MUTATION, { input, editedPrices });
-      return modelSchema.parse(data.createModel);
+      await graphqlRequest(CREATE_MODEL_MUTATION, { input, editedPrices });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
@@ -369,8 +262,7 @@ export function useBulkCreateModels() {
 
   return useMutation({
     mutationFn: async (inputs: CreateModelInput[]) => {
-      const data = await graphqlRequest<{ bulkCreateModels: Model[] }>(BULK_CREATE_MODELS_MUTATION, { inputs });
-      return data.bulkCreateModels.map((model) => modelSchema.parse(model));
+      await graphqlRequest(BULK_CREATE_MODELS_MUTATION, { inputs });
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
@@ -389,8 +281,7 @@ export function useUpdateModel() {
 
   return useMutation({
     mutationFn: async (variables: { id: string; input: UpdateModelInput; editedPrices?: { field: ReferencePriceField; missing: boolean }[]; expectedVersion?: string }) => {
-      const data = await graphqlRequest<{ updateModel: Model }>(UPDATE_MODEL_MUTATION, variables);
-      return modelSchema.parse(data.updateModel);
+      await graphqlRequest(UPDATE_MODEL_MUTATION, variables);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['models'] });

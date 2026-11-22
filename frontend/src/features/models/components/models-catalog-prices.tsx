@@ -9,8 +9,9 @@
 // 注意事项:
 //   未绑定来源的历史价格默认保留，选择某档报价会保存为固定单价。
 import { useTranslation } from 'react-i18next';
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import type { ImportRow, Offer, PriceSelection, ImportSelection } from '../data/catalog-import';
+import type { ImportRow, LocalRate, Offer, PriceSelection, ImportSelection } from '../data/catalog-import';
 import { modelTypeSchema, referencePriceFields, type ReferencePriceField } from '../data/schema';
 
 export const selectStyle = 'h-9 max-w-full rounded-md border bg-background px-2 text-sm';
@@ -23,6 +24,10 @@ export function useReferencePriceFormat() {
 
 function findOffer(row: ImportRow, source: Pick<Offer, 'provider' | 'modelID'> | null) {
   return row.offers.find((offer) => offer.provider === source?.provider && offer.modelID === source.modelID);
+}
+
+function needsRebind(local: LocalRate | undefined, offer: Offer) {
+  return local?.follow && (local.provider !== offer.provider || local.modelID !== offer.modelID || local.canonical !== offer.canonical);
 }
 
 function defaultRequest(modelID: string, route: ImportRow['routes'][number]) {
@@ -43,7 +48,7 @@ export function defaultSelection(
     if (row.version && !local?.follow) continue;
     const source = local && !replaceSource ? findOffer(row, local) : offer;
     const rate = source?.rates.find((r) => r.field === field);
-    if (!source || rate?.base == null) continue;
+    if (!source || rate?.base == null || needsRebind(local, source)) continue;
     if (local && local.value === rate.base && local.provider === source.provider && local.modelID === source.modelID) continue;
     prices.push({
       field,
@@ -161,7 +166,7 @@ export function PriceEditor({
           value={offer ? offerKey(offer) : ''}
           onChange={(e) => selectOffer(row.offers.find((o) => offerKey(o) === e.target.value) ?? null)}
         >
-          <option value=''>{t('models.import.noSource')}</option>
+          <option value=''>{t('models.import.pickSource')}</option>
           {row.offers.map((o) => (
             <option key={offerKey(o)} value={offerKey(o)}>
               {o.provider} · {o.modelID}
@@ -169,6 +174,11 @@ export function PriceEditor({
           ))}
         </select>
       </label>
+      {!row.version && draft.prices.length > 0 && (
+        <Button type='button' size='sm' variant='outline' data-testid='catalog-details-only' onClick={() => onChange({ ...draft, prices: [] })}>
+          {t('models.import.noSource')}
+        </Button>
+      )}
       <p className='text-muted-foreground text-xs'>{t('models.import.unit')}</p>
       <div className='min-w-0'>
         <table className='block w-full text-left text-sm sm:table'>
@@ -187,6 +197,7 @@ export function PriceEditor({
               const binding = action?.provider ? action : local;
               const source = binding?.provider ? findOffer(row, binding) : offer;
               const rate = source?.rates.find((r) => r.field === field);
+              const bound = local?.follow ? findOffer(row, local) : undefined;
               return (
                 <tr
                   key={field}
@@ -210,6 +221,13 @@ export function PriceEditor({
                   <td className='min-w-0 break-words tabular-nums sm:pr-2'>
                     <span className='text-muted-foreground block text-xs sm:hidden'>{t('models.import.referencePrice')}</span>
                     {rate?.base == null ? '—' : formatPrice(rate.base)}
+                    {source && <div className='text-muted-foreground text-xs'>{source.provider} · {source.modelID}</div>}
+                    {bound && local && needsRebind(local, bound) && (
+                      <div className='text-xs'>{t('models.import.identityChanged', { from: local.canonical || '—', to: bound.canonical || '—' })}</div>
+                    )}
+                    {local?.follow && (!bound || bound.rates.find((r) => r.field === field)?.base == null) && (
+                      <div className='text-muted-foreground text-xs'>{t('models.import.sourceMissingPrice')}</div>
+                    )}
                     {rate?.tiers.length ? (
                       <details>
                         <summary className='cursor-pointer text-xs'>{t('models.import.tiers')}</summary>
@@ -268,17 +286,19 @@ function PriceActionSelect({
       </option>
     );
   }
+  const local = row.prices.find((p) => p.field === field);
   const fixed =
-    row.prices.find((p) => p.field === field)?.follow &&
+    local?.follow &&
     option(t('models.import.fixCurrent'), { field, action: 'FIX', provider: '', modelID: '' });
   const groups = row.offers.map((o) => {
     const rate = o.rates.find((r) => r.field === field);
     if (!rate || (rate.base == null && !rate.tiers.length)) return null;
+    const rebind = needsRebind(local, o);
     const source = { field, provider: o.provider, modelID: o.modelID, identity: o.identity };
     return (
       <optgroup key={offerKey(o)} label={o.provider + ' · ' + o.modelID}>
         {rate.base != null &&
-          option(t('models.import.follow') + ' · ' + format(rate.base), { ...source, action: 'FOLLOW', expected: rate.base })}
+          option(t(rebind ? 'models.import.rebind' : 'models.import.follow') + ' · ' + format(rate.base), { ...source, action: rebind ? 'REBIND' : 'FOLLOW', expected: rate.base })}
         {rate.base != null &&
           option(t('models.import.fixBase') + ' · ' + format(rate.base), { ...source, action: 'FIX_BASE', expected: rate.base })}
         {rate.tiers.map((tier) =>

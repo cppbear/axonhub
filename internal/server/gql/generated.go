@@ -365,11 +365,12 @@ type ComplexityRoot struct {
 	}
 
 	CatalogImportLocalPrice struct {
-		Field    func(childComplexity int) int
-		Follow   func(childComplexity int) int
-		ModelID  func(childComplexity int) int
-		Provider func(childComplexity int) int
-		Value    func(childComplexity int) int
+		Canonical func(childComplexity int) int
+		Field     func(childComplexity int) int
+		Follow    func(childComplexity int) int
+		ModelID   func(childComplexity int) int
+		Provider  func(childComplexity int) int
+		Value     func(childComplexity int) int
 	}
 
 	CatalogImportMember struct {
@@ -378,6 +379,7 @@ type ComplexityRoot struct {
 	}
 
 	CatalogImportOffer struct {
+		Canonical func(childComplexity int) int
 		Developer func(childComplexity int) int
 		Identity  func(childComplexity int) int
 		ModelID   func(childComplexity int) int
@@ -3952,6 +3954,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.complexity.CatalogCheckStatus.Settings(childComplexity), true
 
+	case "CatalogImportLocalPrice.canonical":
+		if e.complexity.CatalogImportLocalPrice.Canonical == nil {
+			break
+		}
+
+		return e.complexity.CatalogImportLocalPrice.Canonical(childComplexity), true
 	case "CatalogImportLocalPrice.field":
 		if e.complexity.CatalogImportLocalPrice.Field == nil {
 			break
@@ -3996,6 +4004,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.complexity.CatalogImportMember.Identity(childComplexity), true
 
+	case "CatalogImportOffer.canonical":
+		if e.complexity.CatalogImportOffer.Canonical == nil {
+			break
+		}
+
+		return e.complexity.CatalogImportOffer.Canonical(childComplexity), true
 	case "CatalogImportOffer.developer":
 		if e.complexity.CatalogImportOffer.Developer == nil {
 			break
@@ -23150,6 +23164,35 @@ func (ec *executionContext) fieldContext_CatalogImportLocalPrice_follow(_ contex
 	return fc, nil
 }
 
+func (ec *executionContext) _CatalogImportLocalPrice_canonical(ctx context.Context, field graphql.CollectedField, obj *biz.CatalogImportLocalPrice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_CatalogImportLocalPrice_canonical,
+		func(ctx context.Context) (any, error) {
+			return obj.Canonical, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_CatalogImportLocalPrice_canonical(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "CatalogImportLocalPrice",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _CatalogImportLocalPrice_provider(ctx context.Context, field graphql.CollectedField, obj *biz.CatalogImportLocalPrice) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -23428,6 +23471,35 @@ func (ec *executionContext) _CatalogImportOffer_identity(ctx context.Context, fi
 }
 
 func (ec *executionContext) fieldContext_CatalogImportOffer_identity(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "CatalogImportOffer",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _CatalogImportOffer_canonical(ctx context.Context, field graphql.CollectedField, obj *biz.CatalogImportOffer) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_CatalogImportOffer_canonical,
+		func(ctx context.Context) (any, error) {
+			return obj.Canonical, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_CatalogImportOffer_canonical(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "CatalogImportOffer",
 		Field:      field,
@@ -24259,6 +24331,8 @@ func (ec *executionContext) fieldContext_CatalogImportRow_offers(_ context.Conte
 				return ec.fieldContext_CatalogImportOffer_type(ctx, field)
 			case "identity":
 				return ec.fieldContext_CatalogImportOffer_identity(ctx, field)
+			case "canonical":
+				return ec.fieldContext_CatalogImportOffer_canonical(ctx, field)
 			case "rates":
 				return ec.fieldContext_CatalogImportOffer_rates(ctx, field)
 			}
@@ -24304,6 +24378,8 @@ func (ec *executionContext) fieldContext_CatalogImportRow_preferred(_ context.Co
 				return ec.fieldContext_CatalogImportOffer_type(ctx, field)
 			case "identity":
 				return ec.fieldContext_CatalogImportOffer_identity(ctx, field)
+			case "canonical":
+				return ec.fieldContext_CatalogImportOffer_canonical(ctx, field)
 			case "rates":
 				return ec.fieldContext_CatalogImportOffer_rates(ctx, field)
 			}
@@ -24343,6 +24419,8 @@ func (ec *executionContext) fieldContext_CatalogImportRow_prices(_ context.Conte
 				return ec.fieldContext_CatalogImportLocalPrice_value(ctx, field)
 			case "follow":
 				return ec.fieldContext_CatalogImportLocalPrice_follow(ctx, field)
+			case "canonical":
+				return ec.fieldContext_CatalogImportLocalPrice_canonical(ctx, field)
 			case "provider":
 				return ec.fieldContext_CatalogImportLocalPrice_provider(ctx, field)
 			case "modelID":
@@ -104631,6 +104709,11 @@ func (ec *executionContext) _CatalogImportLocalPrice(ctx context.Context, sel as
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "canonical":
+			out.Values[i] = ec._CatalogImportLocalPrice_canonical(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "provider":
 			out.Values[i] = ec._CatalogImportLocalPrice_provider(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
@@ -104746,6 +104829,11 @@ func (ec *executionContext) _CatalogImportOffer(ctx context.Context, sel ast.Sel
 			}
 		case "identity":
 			out.Values[i] = ec._CatalogImportOffer_identity(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "canonical":
+			out.Values[i] = ec._CatalogImportOffer_canonical(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

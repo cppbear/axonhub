@@ -21,10 +21,11 @@ type ModelCardCost struct {
 // CatalogPrice records how a single reference rate is maintained. Legacy cards
 // have no entries and their existing prices remain under administrator control.
 type CatalogPrice struct {
-	Provider string `json:"provider,omitempty"`
-	ModelID  string `json:"modelID,omitempty"`
-	Follow   bool   `json:"follow,omitempty"`
-	Missing  bool   `json:"missing,omitempty"`
+	Canonical string `json:"canonical,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	ModelID   string `json:"modelID,omitempty"`
+	Follow    bool   `json:"follow,omitempty"`
+	Missing   bool   `json:"missing,omitempty"`
 }
 
 type ModelCardLimit struct {

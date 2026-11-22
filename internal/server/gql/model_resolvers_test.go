@@ -153,6 +153,8 @@ func TestCatalogCheckSitePermissionsAndValidation(t *testing.T) {
 		query, zone, time, code string
 	}{
 		{"project channel grant", "", "write_channels", status, "", "", "FORBIDDEN"},
+		{"site settings reader", "read_settings", "", status, "", "", ""},
+		{"project settings reader", "", "read_settings", status, "", "", "FORBIDDEN"},
 		{"site channel grant", "write_channels", "", status, "", "", ""},
 		{"channel editor cannot configure schedule", "write_channels", "", save, "UTC", "08:30", "FORBIDDEN"},
 		{"project settings grant", "", "write_settings", save, "UTC", "08:30", "FORBIDDEN"},

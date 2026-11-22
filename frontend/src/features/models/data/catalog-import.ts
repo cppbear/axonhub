@@ -19,6 +19,7 @@ export interface ImportRate {
   tiers: { label: string; value: number }[];
 }
 export interface Offer {
+  canonical: string;
   provider: string;
   modelID: string;
   name: string;
@@ -31,6 +32,7 @@ export interface LocalRate {
   field: ReferencePriceField;
   value: number | null;
   follow: boolean;
+  canonical: string;
   provider: string;
   modelID: string;
 }
@@ -59,7 +61,7 @@ export interface CatalogPreview {
 }
 export interface PriceSelection {
   field: ReferencePriceField;
-  action: 'FOLLOW' | 'FIX' | 'FIX_BASE' | 'TIER';
+  action: 'FOLLOW' | 'REBIND' | 'FIX' | 'FIX_BASE' | 'TIER';
   provider: string;
   modelID: string;
   tier?: string;
@@ -98,21 +100,22 @@ export interface CheckStatus {
 }
 export interface Outcome {
   modelID: string;
-  status: 'applied' | 'invalid' | 'conflict' | 'catalogChanged';
+  status: 'applied' | 'invalid' | 'conflict' | 'catalogChanged' | 'failed';
 }
 
-const offerFields = 'provider modelID name developer identity type rates { field base tiers { label value } }';
+const offerFields = 'canonical provider modelID name developer identity type rates { field base tiers { label value } }';
 const statusFields = 'settings { enabled time timezone providers ignorePrefix } nextCheck lastAttempt lastSuccess failed available changed';
 const previewQuery = `query CatalogImportPreview($scope: CatalogImportScope!) {
   catalogImportPreview(scope: $scope) {
     source upstreamURL revision providers rows { modelID name developer members { id identity } routes { channelID channelName actual requests } version archived changed
-      offers { ${offerFields} } preferred { provider modelID } mergeTarget mergeTargetOccupied prices { field value follow provider modelID }
+      offers { ${offerFields} } preferred { provider modelID } mergeTarget mergeTargetOccupied prices { field value follow canonical provider modelID }
     }
   }
 }`;
-export function useCatalogPreview(scope: ImportScope) {
+export function useCatalogPreview(scope: ImportScope, enabled: boolean) {
   return useQuery({
     queryKey: ['catalog-import', scope],
+    enabled,
     queryFn: async ({ signal }) =>
       (await graphqlRequest<{ catalogImportPreview: CatalogPreview }>(previewQuery, { scope }, undefined, { signal })).catalogImportPreview,
     refetchOnWindowFocus: false,
@@ -131,10 +134,10 @@ export function useCatalogApply() {
           variables
         )
       ).applyCatalogImport,
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['models'] });
-      client.invalidateQueries({ queryKey: ['catalog-import'] });
-    },
+    onSettled: () => Promise.all([
+      client.invalidateQueries({ queryKey: ['models'] }),
+      client.invalidateQueries({ queryKey: ['catalog-import'] }),
+    ]),
   });
 }
 export function useCatalogCheckStatus() {

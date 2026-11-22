@@ -12,9 +12,10 @@ package biz
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
-
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -96,7 +97,12 @@ func selection(t *testing.T, preview *CatalogImportPreview, id string) CatalogIm
 		}
 		sel.Routes = append(sel.Routes, CatalogRouteChoice{route.ChannelID, route.Actual, request})
 	}
-	if o := row.Preferred; o != nil {
+	o := row.Preferred
+	if o == nil && len(row.Offers) > 1 {
+		// Simulate an administrator picking a source on an ambiguous new row.
+		o = row.Offers[0]
+	}
+	if o != nil {
 		sel.Identity = o.Identity
 		sel.Provider, sel.SourceModelID = o.Provider, o.ModelID
 		for _, rate := range o.Rates {
@@ -558,4 +564,138 @@ func TestCatalogImportRechecksRoutesPerRow(t *testing.T) {
 	})
 	require.Equal(t, []string{"applied", "conflict", "applied"}, f.apply(t, scope, p, selections...))
 	require.False(t, f.db.Model.Query().Where(model.ModelIDEQ("second")).ExistX(f.ctx))
+}
+
+func TestCatalogPriceIdentityAndWithdrawal(t *testing.T) {
+	f := catalogFixture(t)
+	scope := CatalogImportScope{Providers: []string{"moonshot-ai"}}
+	p := f.preview(t, scope)
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, selection(t, p, "kimi-k3")))
+	for _, canonical := range []string{"other/new-model", "", "moonshotai/kimi-k3"} {
+		body := strings.ReplaceAll(testCatalog, "moonshotai/kimi-k3", canonical)
+		f.changeCatalog(body)
+		p = f.preview(t, scope)
+		edit := selection(t, p, "kimi-k3")
+		edit.Prices = edit.Prices[:1]
+		require.Equal(t, []string{"catalogChanged"}, f.apply(t, scope, p, edit))
+		edit.Prices[0].Action = CatalogPriceRebind
+		require.Equal(t, []string{"applied"}, f.apply(t, scope, p, edit))
+		require.Equal(t, canonical, f.db.Model.Query().OnlyX(f.ctx).ModelCard.CatalogPrices["input"].Canonical)
+	}
+	// A legacy follower has no canonical ID until the administrator adopts it.
+	m := f.db.Model.Query().OnlyX(f.ctx)
+	binding := m.ModelCard.CatalogPrices["input"]
+	binding.Canonical = ""
+	m.ModelCard.CatalogPrices["input"] = binding
+	m.Update().SetModelCard(m.ModelCard).ExecX(f.ctx)
+	f.changeCatalog(strings.Replace(testCatalog, `"input":3,"output":15`, `"input":30,"output":16`, 1))
+	p = f.preview(t, scope)
+	edit := selection(t, p, "kimi-k3")
+	input, output := edit, edit
+	input.Prices, output.Prices = edit.Prices[:1], edit.Prices[1:]
+	require.Equal(t, []string{"catalogChanged", "applied"}, f.apply(t, scope, p, input, output))
+	updated := f.db.Model.Query().OnlyX(f.ctx)
+	require.Equal(t, 3., updated.ModelCard.Cost.Input)
+	require.Equal(t, 16., updated.ModelCard.Cost.Output)
+
+	f.changeCatalog(strings.Replace(testCatalog, `"input":3,"output":15`, `"output":16`, 1))
+	state, err := f.svc.CheckModelCatalog(f.ctx)
+	require.NoError(t, err)
+	require.Zero(t, state.Changed)
+	require.Len(t, f.preview(t, CatalogImportScope{Tracked: true}).Rows, 1)
+	require.Equal(t, 3., *f.db.Model.Query().OnlyX(f.ctx).ModelCard.ReferencePrice("input"))
+}
+
+func TestCatalogImportOverlappingAliases(t *testing.T) {
+	for _, mergeFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mergeFirst=%t", mergeFirst), func(t *testing.T) {
+			f := catalogFixture(t)
+			f.channel(t, channel.StatusEnabled, "first", "a/shared", "b/shared")
+			scope := CatalogImportScope{Channels: true, IgnorePrefix: !mergeFirst}
+			other := CatalogImportScope{Channels: true, IgnorePrefix: mergeFirst}
+			p, q := f.preview(t, scope), f.preview(t, other)
+			first := selection(t, p, "first")
+			second := selection(t, p, lo.Ternary(mergeFirst, "a/shared", "shared"))
+			interleaved := selection(t, q, lo.Ternary(mergeFirst, "shared", "a/shared"))
+			first.Developer, second.Developer, interleaved.Developer = "dev", "dev", "dev"
+			second.Name, interleaved.Name = "Second", "Interleaved"
+			f.db.Model.Use(func(next ent.Mutator) ent.Mutator {
+				return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+					v, err := next.Mutate(ctx, m)
+					if id, _ := m.(*ent.ModelMutation).ModelID(); err == nil && id == "first" {
+						runAfterCommit(ctx, func(context.Context) { require.Equal(t, []string{"applied"}, f.apply(t, other, q, interleaved)) })
+					}
+					return v, err
+				})
+			})
+			require.Equal(t, []string{"applied", "conflict"}, f.apply(t, scope, p, first, second))
+			require.Equal(t, 2, f.db.Model.Query().CountX(f.ctx))
+		})
+	}
+}
+
+func TestCatalogImportUsesOnlyReviewedRoutes(t *testing.T) {
+	f := catalogFixture(t)
+	f.channel(t, channel.StatusEnabled, "kimi-k3")
+	original := f.db.Channel.Query().OnlyX(f.ctx)
+	scope := CatalogImportScope{Channels: true}
+	preview := f.preview(t, scope)
+	sel := selection(t, preview, "kimi-k3")
+	f.channel(t, channel.StatusDisabled, "kimi-k3")
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, preview, sel))
+	associations := f.db.Model.Query().OnlyX(f.ctx).Settings.Associations
+	require.Len(t, associations, 1)
+	require.Equal(t, original.ID, associations[0].ChannelModel.ChannelID)
+}
+
+func TestCatalogImportPartialFailureAndDetails(t *testing.T) {
+	f := catalogFixture(t)
+	f.changeCatalog(`{"providers":{"openai":{"models":[{"id":"one","name":"Vector","type":"embedding","limit":{"context":256000},"reasoning_options":[{"type":"effort","values":["high",null,"unknown","low","high"]}],"cost":{"input":3}},{"id":"two"},{"id":"three"}]}}}`)
+	scope := CatalogImportScope{Providers: []string{"openai"}}
+	p := f.preview(t, scope)
+	one, two, three := selection(t, p, "one"), selection(t, p, "two"), selection(t, p, "three")
+	one.Type, one.Prices = "embedding", nil
+	f.db.Model.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if id, _ := m.(*ent.ModelMutation).ModelID(); id == "two" {
+				return nil, errors.New("test row failure")
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+	require.Equal(t, []string{"applied", "failed", "applied"}, f.apply(t, scope, p, one, two, three))
+	m := f.db.Model.Query().Where(model.ModelIDEQ("one")).OnlyX(f.ctx)
+	require.Empty(t, m.Settings.Associations)
+	require.Equal(t, model.TypeEmbedding, m.Type)
+	require.Equal(t, 256000, m.ModelCard.Limit.Context)
+	require.Equal(t, []string{"low", "high"}, m.ModelCard.ReasoningEfforts)
+	require.Len(t, MissingReferencePrices(m.ModelCard), 4)
+}
+
+func TestCatalogCanonicalAliasMatchesOnlyUnambiguousVariants(t *testing.T) {
+	f := catalogFixture(t)
+	f.changeCatalog(string(fallbackCatalogJSON()))
+	f.channel(t, channel.StatusEnabled, "kimi-k3", "moonshotai/kimi-k3", "kimi-k3.1-pro", "moonshotai/kimi-k3.1-pro")
+	p := f.preview(t, CatalogImportScope{Channels: true, IgnorePrefix: true})
+	require.Len(t, p.Rows, 3)
+	require.Equal(t, []string{"kimi-k3", "moonshotai/kimi-k3"}, memberIDs(selection(t, p, "kimi-k3")))
+	require.Len(t, selection(t, p, "moonshotai/kimi-k3.1-pro").Members, 1)
+}
+
+func TestCatalogScheduleDST(t *testing.T) {
+	cfg := CatalogCheckSettings{Time: "02:30", Timezone: "America/New_York"}
+	now := time.Date(2026, 3, 8, 6, 29, 0, 0, time.UTC)
+	next, err := cfg.next(now, "")
+	require.NoError(t, err)
+	require.True(t, next.Equal(time.Date(2026, 3, 9, 6, 30, 0, 0, time.UTC)), next)
+	cfg.Time = "01:30"
+	first, err := cfg.next(time.Date(2026, 11, 1, 4, 0, 0, 0, time.UTC), "")
+	require.NoError(t, err)
+	second, err := cfg.next(first, first.Format(time.DateOnly))
+	require.NoError(t, err)
+	require.Equal(t, "2026-11-02 01:30", second.Format("2006-01-02 15:04"))
+	cfg.Time = "18:00"
+	next, err = cfg.next(first, first.Format(time.DateOnly))
+	require.NoError(t, err)
+	require.Equal(t, "2026-11-02 18:00", next.Format("2006-01-02 15:04"))
 }
