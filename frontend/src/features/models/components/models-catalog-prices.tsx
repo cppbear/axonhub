@@ -80,14 +80,15 @@ export function defaultSelection(
 export function PriceEditor({
   row,
   draft,
+  offer,
   onChange,
 }: {
   row: ImportRow;
   draft: ImportSelection;
+  offer: Offer | undefined;
   onChange: (value: ImportSelection) => void;
 }) {
   const { t } = useTranslation();
-  const offer = row.offers.find((o) => o.provider === draft.provider && o.modelID === draft.sourceModelID);
   const formatPrice = useReferencePriceFormat();
   function selectOffer(next: Offer | null) {
     const defaults = defaultSelection(row, next, true);
@@ -129,9 +130,14 @@ export function PriceEditor({
       )}
       {!row.version &&
         row.routes.map((route, index) => {
-          if (defaultRequest(row.modelID, route)) return null;
           const key = route.channelID + '/' + route.actual;
           const label = t('models.import.route', { channel: route.channelName, model: route.actual });
+          if (defaultRequest(row.modelID, route))
+            return (
+              <p key={key} className='text-muted-foreground text-xs break-all'>
+                {label} · {draft.routes[index].request}
+              </p>
+            );
           if (!route.requests.length)
             return (
               <p key={key} className='text-muted-foreground text-xs'>

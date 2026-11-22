@@ -190,10 +190,11 @@ function PreviewRows({
         {!visible.length && <p className='text-muted-foreground p-4 text-sm'>{t('models.import.empty')}</p>}
         {visible.map((row) => {
           const draft = draftFor(row);
+          const offer = row.offers.find((o) => o.provider === draft.provider && o.modelID === draft.sourceModelID);
           let status = !row.version ? 'new' : row.changed ? 'changed' : 'existing';
           if (row.archived) status = 'archived';
           else if (!row.offers.length) status = 'unmatched';
-          else if (!row.preferred && !draft.provider) status = 'chooseSource';
+          else if (!offer && (row.version ? !row.preferred : requiresSource(row))) status = 'chooseSource';
           let priceSummary = draft.prices
             .map((a) => {
               const next = a.expected;
@@ -203,8 +204,8 @@ function PreviewRows({
                 : `${t('models.modelCard.' + a.field)} ${current == null ? '' : formatPrice(current) + ' → '}${next == null ? '—' : formatPrice(next)}`;
             })
             .join(' · ');
-          if (!priceSummary && !row.version && row.offers.length) {
-            const hasQuote = row.offers.some((o) => o.rates.some((r) => r.base != null || r.tiers.length > 0));
+          if (!priceSummary && !row.version && offer) {
+            const hasQuote = offer.rates.some((r) => r.base != null || r.tiers.length > 0);
             priceSummary = t(hasQuote ? 'models.import.noPrices' : 'models.import.noQuotes');
           }
           return (
@@ -233,7 +234,12 @@ function PreviewRows({
                 </button>
               </div>
               {expanded === row.modelID && (
-                <PriceEditor row={row} draft={draft} onChange={(value) => setEdits((prev) => ({ ...prev, [row.modelID]: value }))} />
+                <PriceEditor
+                  row={row}
+                  draft={draft}
+                  offer={offer}
+                  onChange={(value) => setEdits((prev) => ({ ...prev, [row.modelID]: value }))}
+                />
               )}
             </div>
           );

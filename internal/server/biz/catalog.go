@@ -89,13 +89,17 @@ func NewCatalogService(system *SystemService, httpClient *httpclient.HttpClient)
 }
 
 func (s *CatalogService) Snapshot(ctx context.Context, filtered bool) (CatalogSnapshot, error) {
-	return s.snapshot(ctx, filtered, false)
+	// The public catalog query finishes warming the cache even if its caller leaves.
+	return s.snapshot(context.WithoutCancel(ctx), filtered, false)
 }
 
 // A fresh snapshot joins an in-flight fetch but never returns a previously held result.
 func (s *CatalogService) snapshot(ctx context.Context, filtered, fresh bool) (CatalogSnapshot, error) {
 	for {
 		payload, err := s.ensure(ctx, filtered, fresh)
+		if ctx.Err() != nil {
+			return CatalogSnapshot{}, ctx.Err()
+		}
 		if errors.Is(err, errCatalogInvalidated) {
 			continue
 		}
@@ -146,10 +150,9 @@ func (s *CatalogService) ensure(ctx context.Context, filtered, fresh bool) (*cat
 	generation := s.generation
 	s.mu.Unlock()
 
-	// A shared fetch outlives its first caller, including the settings read.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), catalogFetchTimeout)
-	defer cancel()
-	upstreamURL, err := s.currentUpstreamURL(ctx)
+	settingsCtx, cancel := context.WithTimeout(ctx, catalogFetchTimeout)
+	upstreamURL, err := s.currentUpstreamURL(settingsCtx)
+	cancel()
 	if err != nil {
 		return nil, err
 	}
@@ -170,8 +173,8 @@ func (s *CatalogService) ensure(ctx context.Context, filtered, fresh bool) (*cat
 		return held, nil
 	}
 	key := fmt.Sprintf("%t/%d", filtered, generation)
-	value, err, _ := s.sf.Do(key, func() (any, error) {
-		data, source, err := s.load(ctx, filtered, upstreamURL)
+	result := s.sf.DoChan(key, func() (any, error) {
+		data, source, err := s.load(context.WithoutCancel(ctx), filtered, upstreamURL)
 		if err != nil {
 			return nil, err
 		}
@@ -182,16 +185,19 @@ func (s *CatalogService) ensure(ctx context.Context, filtered, fresh bool) (*cat
 		}
 		return payload, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-result:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		payload, ok := res.Val.(*catalogPayload)
+		if !ok || payload == nil {
+			return nil, fmt.Errorf("catalog load returned no payload")
+		}
+		return payload, nil
 	}
-
-	payload, ok := value.(*catalogPayload)
-	if !ok || payload == nil {
-		return nil, fmt.Errorf("catalog load returned no payload")
-	}
-
-	return payload, nil
 }
 
 // load fetches the upstream catalog and falls back to the bundled one when the

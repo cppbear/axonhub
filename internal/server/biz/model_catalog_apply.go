@@ -180,7 +180,10 @@ func (svc *ModelService) applyCatalogRow(ctx context.Context, source string, row
 	if sel.Provider != "" && (primary == nil || primary.Identity != sel.Identity) {
 		return errCatalogQuoteChanged
 	}
-	card := newImportCard(primary)
+	card, err := newImportCard(primary)
+	if err != nil {
+		return err
+	}
 	ids := sortedStringKeys(submitted)
 	if len(sel.Members) > 1 {
 		card.CatalogAliases = ids
@@ -383,13 +386,13 @@ func applyCatalogPrices(card *objects.ModelCard, offers map[catalogOfferKey]*Cat
 	return nil
 }
 
-func newImportCard(o *CatalogImportOffer) *objects.ModelCard {
+func newImportCard(o *CatalogImportOffer) (*objects.ModelCard, error) {
 	card := &objects.ModelCard{CatalogPrices: map[string]objects.CatalogPrice{}}
 	for _, field := range catalogPriceFields {
 		card.CatalogPrices[field] = objects.CatalogPrice{Missing: true}
 	}
 	if o == nil {
-		return card
+		return card, nil
 	}
 	// Catalog keys shared with the global card include modalities, limit and reasoning.
 	var metadata struct {
@@ -407,9 +410,12 @@ func newImportCard(o *CatalogImportOffer) *objects.ModelCard {
 			Values []string
 		} `json:"reasoning_options"`
 	}
-	raw, _ := json.Marshal(o.entry)
-	if json.Unmarshal(raw, &metadata) != nil {
-		return card
+	raw, err := json.Marshal(o.entry)
+	if err != nil {
+		return nil, fmt.Errorf("encode catalog model metadata: %w", err)
+	}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil, fmt.Errorf("decode catalog model metadata: %w", err)
 	}
 	card.Reasoning, card.Modalities, card.Limit = metadata.Reasoning, metadata.Modalities, metadata.Limit
 	card.Vision = slices.Contains(card.Modalities.Input, "image")
@@ -428,7 +434,7 @@ func newImportCard(o *CatalogImportOffer) *objects.ModelCard {
 			break
 		}
 	}
-	return card
+	return card, nil
 }
 
 func MissingReferencePrices(card *objects.ModelCard) []string {

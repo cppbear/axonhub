@@ -108,6 +108,11 @@ test('reference prices show the bound source and distinguish missing from unsele
       { modelID: 'tiers-only', rates: [{ field: 'input', base: null, tiers: [{ label: 'context 256000', value: 2.5 }] }] },
     ].map(({ modelID, rates }) => {
       const offer = { ...providerA, modelID, rates, type: 'embedding', name: 'Vector embedding' };
+      if (modelID === 'zero') {
+        const unpriced = { ...offer, provider: 'provider-b', rates: [] };
+        const route = { channelID: 12, channelName: 'Test channel', actual: modelID, requests: ['public-zero'] };
+        return { ...row(modelID), offers: [offer, unpriced], preferred: offer, routes: [route], prices: [] };
+      }
       return { ...row(modelID), offers: [offer], preferred: offer, prices: [] };
     }),
   ];
@@ -142,6 +147,15 @@ test('reference prices show the bound source and distinguish missing from unsele
   await expect(expand('tiers-only')).toContainText(/No reference prices selected|未选用参考价/);
   await expect(expand('zero')).toContainText('$0');
   await expand('zero').click();
+  await expect(page.getByText(/Test channel.*zero.*public-zero|zero.*Test channel.*public-zero/)).toBeVisible();
+  const source = page.getByRole('combobox', { name: /Price source|报价来源/ });
+  await source.selectOption('');
+  await expect(expand('zero')).toContainText(/Choose a price source|请选择报价来源/);
+  await expect(expand('zero')).not.toContainText(/No reference prices|暂无参考价|未选用参考价/);
+  await source.selectOption({ label: 'provider-b · zero' });
+  await expect(expand('zero')).toContainText(/No reference prices available|暂无参考价/);
+  await source.selectOption({ label: 'provider-a · zero' });
+  await expect(expand('zero')).toContainText('$0');
   await page.getByTestId('catalog-details-only').click();
   await expect(expand('zero')).toContainText(/No reference prices selected|未选用参考价/);
   await page.getByRole('checkbox', { name: 'zero', exact: true }).click();
@@ -149,6 +163,7 @@ test('reference prices show the bound source and distinguish missing from unsele
   await expect.poll(() => applied).toEqual([expect.objectContaining({
     modelID: 'zero', provider: 'provider-a', sourceModelID: 'zero', identity: 'v1',
     type: 'embedding', name: 'Vector embedding', prices: [],
+    routes: [{ channelID: 12, actual: 'zero', request: 'public-zero' }],
   })]);
 });
 

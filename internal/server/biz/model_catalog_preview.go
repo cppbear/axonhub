@@ -361,7 +361,7 @@ func (o *CatalogImportOffer) rate(field ReferencePriceField) *CatalogImportRate 
 }
 
 func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope CatalogImportScope) (*CatalogImportPreview, error) {
-	snapshot, err := svc.catalog.Snapshot(ctx, false)
+	snapshot, err := svc.catalog.snapshot(ctx, false, false)
 	if err != nil {
 		return nil, err
 	}

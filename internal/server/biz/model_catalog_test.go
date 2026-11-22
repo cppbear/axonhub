@@ -672,6 +672,17 @@ func TestCatalogImportPartialFailureAndDetails(t *testing.T) {
 	require.Len(t, MissingReferencePrices(m.ModelCard), 4)
 }
 
+func TestCatalogImportMalformedMetadataFailsOnlyItsRow(t *testing.T) {
+	f := catalogFixture(t)
+	f.changeCatalog(`{"providers":{"openai":{"models":[{"id":"one"},{"id":"two","limit":{"context":"128000"}},{"id":"three"}]}}}`)
+	scope := CatalogImportScope{Providers: []string{"openai"}}
+	p := f.preview(t, scope)
+	require.Equal(t, []string{"applied", "failed", "applied"}, f.apply(t, scope, p,
+		selection(t, p, "one"), selection(t, p, "two"), selection(t, p, "three")))
+	ids := f.db.Model.Query().Select(model.FieldModelID).StringsX(f.ctx)
+	require.ElementsMatch(t, []string{"one", "three"}, ids)
+}
+
 func TestCatalogCanonicalAliasMatchesOnlyUnambiguousVariants(t *testing.T) {
 	f := catalogFixture(t)
 	f.changeCatalog(string(fallbackCatalogJSON()))

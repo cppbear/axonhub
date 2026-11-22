@@ -212,6 +212,39 @@ func TestCatalogService_CancelledCallerDoesNotCauseFallback(t *testing.T) {
 	require.Contains(t, string(snapshot.Data), "gpt-hot")
 }
 
+func TestCatalogImportCancellationLeavesSharedFetchRunning(t *testing.T) {
+	f := catalogFixture(t)
+	scope := CatalogImportScope{Providers: []string{"moonshot-ai"}}
+	release := make(chan struct{})
+	finish := sync.OnceFunc(func() { close(release) })
+	defer finish()
+	loading, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	var hits atomic.Int32
+	useCatalogUpstream(t, f.ctx, f.svc.systemService, f.svc.catalog, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		cancel()
+		select {
+		case <-r.Context().Done():
+			t.Error("canceling the preview stopped the shared request")
+		case <-release:
+			_, _ = w.Write([]byte(testCatalog))
+		}
+	})
+
+	cancelled, stop := context.WithCancel(f.ctx)
+	stop()
+	_, err := f.svc.CatalogImportPreview(cancelled, scope)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, hits.Load())
+
+	_, err = f.svc.CatalogImportPreview(loading, scope)
+	require.ErrorIs(t, err, context.Canceled)
+	finish()
+	require.Equal(t, catalogSourceUpstream, f.preview(t, scope).Source)
+	require.EqualValues(t, 1, hits.Load())
+}
+
 func TestCatalogService_MirrorChangeDiscardsInflightCacheFill(t *testing.T) {
 	ctx, system, svc := newCatalogTestService(t)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
