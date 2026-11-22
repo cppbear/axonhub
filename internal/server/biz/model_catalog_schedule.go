@@ -241,6 +241,7 @@ func (svc *ModelService) registerCatalogCheck(ctx context.Context, s *scheduler.
 	// Read the persisted wall time each tick, so changes take effect on every replica
 	// and rollback of a settings mutation cannot leave an in-memory schedule behind.
 	return s.Register(ctx, scheduler.TaskSpec{Name: "model-catalog-check", Description: "Check global model catalog changes", CronExpr: "* * * * *", Timezone: "UTC"}, func(ctx context.Context) {
+		ctx = authz.NewSystemContext(ctx)
 		_, err := svc.checkModelCatalog(ctx, time.Now().UTC(), true)
 		if err != nil {
 			log.Warn(ctx, "scheduled model catalog check failed", log.Cause(err))
