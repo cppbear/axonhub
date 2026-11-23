@@ -8,6 +8,7 @@
 // 注意事项:
 //
 //	调度只记录检查结果。手动预览不会订阅服务商，也不会改变每日任务范围。
+
 package biz
 
 import (
@@ -26,8 +27,10 @@ import (
 	"github.com/looplj/axonhub/internal/server/scheduler"
 )
 
-const catalogCheckSettingsKey = "model_catalog_check_settings"
-const catalogCheckResultKey = "model_catalog_check_result"
+const (
+	catalogCheckSettingsKey = "model_catalog_check_settings"
+	catalogCheckResultKey   = "model_catalog_check_result"
+)
 
 type CatalogCheckSettings struct {
 	Enabled      bool     `json:"enabled"`
@@ -44,11 +47,12 @@ type CatalogCheckStatus struct {
 }
 
 type catalogCheckResult struct {
-	LastAttempt        *time.Time
-	LastSuccess        *time.Time
-	Failed             bool
-	Available, Changed int
-	ScheduledDay       string `json:",omitempty"`
+	LastAttempt  *time.Time `json:"LastAttempt"`
+	LastSuccess  *time.Time `json:"LastSuccess"`
+	Failed       bool       `json:"Failed"`
+	Available    int        `json:"Available"`
+	Changed      int        `json:"Changed"`
+	ScheduledDay string     `json:"ScheduledDay,omitempty"`
 }
 
 func (s CatalogCheckSettings) next(now time.Time, scheduledDay string) (time.Time, error) {
