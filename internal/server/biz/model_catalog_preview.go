@@ -8,6 +8,7 @@
 // 注意事项:
 //
 //	同名后缀只用于查找候选；冲突版本须由管理员选择合并。
+
 package biz
 
 import (
@@ -31,8 +32,10 @@ import (
 	"github.com/looplj/axonhub/internal/objects"
 )
 
-var catalogPriceFields = []string{"input", "output", "cacheRead", "cacheWrite"}
-var catalogCostKeys = map[string]string{"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
+var (
+	catalogPriceFields = []string{"input", "output", "cacheRead", "cacheWrite"}
+	catalogCostKeys    = map[string]string{"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
+)
 
 type CatalogImportScope struct {
 	Channels              bool
@@ -277,13 +280,12 @@ func preferredOffer(offers []*CatalogImportOffer) *CatalogImportOffer {
 		}
 		identity = o.Canonical
 		owner, _, _ := strings.Cut(o.Canonical, "/")
-		if !(o.Provider == owner || (owner == "moonshotai" && o.Provider == "moonshot-ai")) {
-			continue
+		if o.Provider == owner || (owner == "moonshotai" && o.Provider == "moonshot-ai") {
+			if official != nil {
+				return nil
+			}
+			official = o
 		}
-		if official != nil {
-			return nil
-		}
-		official = o
 	}
 	return official
 }
@@ -419,7 +421,6 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 	}
 	existing := map[string]*ent.Model{}
 	importedIDs := map[string]string{}
-	aliases := map[string][]string{}
 	channelRoutes := map[string][]CatalogImportRoute{}
 	providerOffers := map[string][]*CatalogImportOffer{}
 	for _, m := range local {
@@ -434,7 +435,6 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 	for id := range existing {
 		importedIDs[id] = id
 	}
-	mergeTargets := map[string]string{}
 	allIDs := map[string]bool{}
 	if scope.Channels {
 		channelRoutes, err = catalogChannelRoutes(ctx, db.Channel.Query())
@@ -451,31 +451,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 			providerOffers[key.id] = append(providerOffers[key.id], offer)
 		}
 	}
-	groups := map[string][]string{}
-	for _, id := range sortedStringKeys(allIDs) {
-		if parent := importedIDs[id]; parent != "" {
-			aliases[parent] = append(aliases[parent], id)
-			continue
-		}
-		target := id
-		if scope.IgnorePrefix && len(channelRoutes[id]) > 0 {
-			target = catalogLastIDSegment(id)
-		}
-		groups[target] = append(groups[target], id)
-	}
-	for target, group := range groups {
-		occupied := importedIDs[target] != ""
-		if len(group) > 1 && !occupied && shareCatalogIdentity(group, idx) {
-			aliases[target] = group
-			continue
-		}
-		for _, id := range group {
-			aliases[id] = []string{id}
-			if scope.IgnorePrefix && (len(group) > 1 || (occupied && id != target)) {
-				mergeTargets[id] = target
-			}
-		}
-	}
+	aliases, mergeTargets := idx.groupModelIDs(allIDs, importedIDs, channelRoutes, scope.IgnorePrefix)
 	// Checks include all followed models. Provider previews also include delisted followed offers.
 	selectedProviders := lo.Intersect(scope.Providers, idx.providers)
 	if scope.Tracked || (snapshot.Source == catalogSourceUpstream && len(selectedProviders) > 0) {
@@ -499,7 +475,6 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 		slices.Sort(aliases[id])
 		target := mergeTargets[id]
 		row := &CatalogImportRow{ModelID: id, Name: id, MergeTarget: target, MergeTargetOccupied: target != "" && importedIDs[target] != ""}
-		var candidates []*CatalogImportOffer
 		for _, alias := range slices.Compact(aliases[id]) {
 			exact := idx.matchingOffers(alias, scope.IgnorePrefix)
 			var identity string
@@ -512,17 +487,17 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 			row.Members = append(row.Members, CatalogImportMember{alias, identity})
 			if routes, configured := channelRoutes[alias]; configured {
 				row.Routes = append(row.Routes, routes...)
-				candidates = append(candidates, exact...)
+				row.Offers = append(row.Offers, exact...)
 			} else {
-				candidates = append(candidates, providerOffers[alias]...)
+				row.Offers = append(row.Offers, providerOffers[alias]...)
 			}
 		}
-		candidates = lo.Uniq(candidates)
-		row.Preferred = preferredOffer(candidates)
-		if scope.IgnorePrefix && len(candidates) == 0 {
-			candidates = idx.canonical[id]
-			if len(candidates) == 0 {
-				candidates = idx.byLastSegment[catalogLastIDSegment(id)]
+		row.Offers = lo.Uniq(row.Offers)
+		row.Preferred = preferredOffer(row.Offers)
+		if scope.IgnorePrefix && len(row.Offers) == 0 {
+			row.Offers = idx.canonical[id]
+			if len(row.Offers) == 0 {
+				row.Offers = idx.byLastSegment[catalogLastIDSegment(id)]
 			}
 		}
 		if m := existing[id]; m != nil {
@@ -532,40 +507,11 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 				return nil, err
 			}
 			row.Prices = catalogLocalPrices(m.ModelCard)
-			for _, p := range row.Prices {
-				if p.Provider == "" {
-					continue
-				}
-				o := idx.offers[catalogOfferKey{p.Provider, p.ModelID}]
-				if o == nil {
-					if p.Follow && snapshot.Source == catalogSourceUpstream && slices.Contains(idx.providers, p.Provider) {
-						row.needsReview = true
-					}
-					continue
-				}
-				candidates = append(candidates, o)
-				if len(providerOffers[id]) == 0 && p.Follow {
-					row.Preferred = o
-				}
-				if !p.Follow {
-					continue
-				}
-				rate := o.rate(p.Field)
-				if rate == nil || rate.Base == nil {
-					row.needsReview = true
-					continue
-				}
-				differentPrice := p.Value == nil || *p.Value != *rate.Base
-				if p.Canonical != o.Canonical {
-					row.needsReview = row.needsReview || p.Canonical != "" || differentPrice
-				} else if differentPrice {
-					row.Changed = true
-				}
-			}
+			idx.addBoundOffers(row, len(providerOffers[id]) == 0, snapshot.Source)
 		} else if row.Preferred != nil {
 			row.Name = row.Preferred.Name
 		}
-		row.Offers = lo.Uniq(candidates)
+		row.Offers = lo.Uniq(row.Offers)
 		sort.Slice(row.Offers, func(i, j int) bool {
 			a, b := row.Offers[i], row.Offers[j]
 			if a.Provider != b.Provider {
@@ -576,4 +522,68 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 		preview.Rows = append(preview.Rows, row)
 	}
 	return preview, nil
+}
+
+func (idx *catalogIndex) groupModelIDs(allIDs map[string]bool, importedIDs map[string]string, channelRoutes map[string][]CatalogImportRoute, ignorePrefix bool) (map[string][]string, map[string]string) {
+	aliases := map[string][]string{}
+	mergeTargets := map[string]string{}
+	groups := map[string][]string{}
+	for _, id := range sortedStringKeys(allIDs) {
+		if parent := importedIDs[id]; parent != "" {
+			aliases[parent] = append(aliases[parent], id)
+			continue
+		}
+		target := id
+		if ignorePrefix && len(channelRoutes[id]) > 0 {
+			target = catalogLastIDSegment(id)
+		}
+		groups[target] = append(groups[target], id)
+	}
+	for target, group := range groups {
+		occupied := importedIDs[target] != ""
+		if len(group) > 1 && !occupied && shareCatalogIdentity(group, idx) {
+			aliases[target] = group
+			continue
+		}
+		for _, id := range group {
+			aliases[id] = []string{id}
+			if ignorePrefix && (len(group) > 1 || (occupied && id != target)) {
+				mergeTargets[id] = target
+			}
+		}
+	}
+	return aliases, mergeTargets
+}
+
+func (idx *catalogIndex) addBoundOffers(row *CatalogImportRow, preferFollowed bool, source string) {
+	for _, p := range row.Prices {
+		if p.Provider == "" {
+			continue
+		}
+		o := idx.offers[catalogOfferKey{p.Provider, p.ModelID}]
+		if o == nil {
+			if p.Follow && source == catalogSourceUpstream && slices.Contains(idx.providers, p.Provider) {
+				row.needsReview = true
+			}
+			continue
+		}
+		row.Offers = append(row.Offers, o)
+		if preferFollowed && p.Follow {
+			row.Preferred = o
+		}
+		if !p.Follow {
+			continue
+		}
+		rate := o.rate(p.Field)
+		if rate == nil || rate.Base == nil {
+			row.needsReview = true
+			continue
+		}
+		differentPrice := p.Value == nil || *p.Value != *rate.Base
+		if p.Canonical != o.Canonical {
+			row.needsReview = row.needsReview || p.Canonical != "" || differentPrice
+		} else if differentPrice {
+			row.Changed = true
+		}
+	}
 }
