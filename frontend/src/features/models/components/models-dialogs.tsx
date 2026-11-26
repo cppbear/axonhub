@@ -1,3 +1,4 @@
+import { PermissionGuard } from '@/components/permission-guard';
 import { ModelsCatalogImport } from './models-catalog-import';
 import { useModels } from '../context/models-context';
 import { ModelsActionDialog } from './models-action-dialog';
@@ -17,7 +18,11 @@ export function ModelsDialogs() {
     <>
       {(open === 'create' || open === 'edit') && <ModelsActionDialog />}
       {open === 'batchCreate' && <ModelsBatchCreateDialog />}
-      {open === 'catalogImport' && <ModelsCatalogImport onClose={() => setOpen(null)} />}
+      {open === 'catalogImport' && (
+        <PermissionGuard requiredSystemScope='write_channels'>
+          <ModelsCatalogImport onClose={() => setOpen(null)} />
+        </PermissionGuard>
+      )}
       {open === 'delete' && <ModelsDeleteDialog />}
       {open === 'archive' && <ModelsArchiveDialog />}
       {(open === 'association' || open === 'developerAssociation') && <ModelsAssociationDialog />}

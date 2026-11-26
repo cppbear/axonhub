@@ -1,13 +1,26 @@
-// 职责: 验证批量导入的分项报价来源、缺价提示和跨页选择在刷新后的行为。
+// 职责: 验证批量导入的报价、跨页选择以及复核导航和权限。
 // 关联文件:
 //   frontend/src/features/models/components/models-catalog-import.tsx
 //   frontend/src/features/models/components/models-catalog-prices.tsx
 //   frontend/src/features/models/data/catalog-import.ts
 //   frontend/src/routes/_authenticated/models/index.tsx
+//   frontend/src/features/models/components/models-dialogs.tsx
 // 注意事项:
 //   导入提交使用隔离响应。
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { gotoAndEnsureAuth } from './auth.utils';
+
+const emptyPreview = { rows: [], providers: [], source: 'upstream', upstreamURL: 'https://example.test', revision: 'review' };
+
+async function mockSiteScopes(page: Page, scopes: string[]) {
+  await page.route('**/admin/graphql', async (route) => {
+    if (route.request().postDataJSON().operationName !== 'Me') return route.fallback();
+    const response = await route.fetch();
+    const body = await response.json();
+    Object.assign(body.data.me, { isOwner: false, scopes });
+    return route.fulfill({ json: body });
+  });
+}
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/admin/graphql', async (route) => {
@@ -265,11 +278,21 @@ test('a review link opens the saved scope once and regular import keeps its own 
     } } } });
   });
   await gotoAndEnsureAuth(page, '/models');
-  await page.goto('/models?catalogReview=' + encodeURIComponent(JSON.stringify(scope)));
+  const reviewURL = '/models?catalogReview=' + encodeURIComponent(JSON.stringify(scope));
+  // The plugin opens its review with a same-document history push.
+  const openReview = () => page.evaluate((url) => window.__TSR_ROUTER__!.history.push(url), reviewURL);
+  await openReview();
   await expect(page.getByTestId('catalog-review-scope')).toContainText('moonshot · openai');
   await expect(page.getByTestId('catalog-import-rows')).toBeVisible();
   expect(previews).toEqual([{ ...scope, review: true }]);
   await expect(page).not.toHaveURL(/catalogReview/);
+  await page.goBack();
+  await expect(page.getByTestId('catalog-review-scope')).toHaveCount(0);
+  await page.goForward();
+  await expect(page.getByTestId('catalog-review-scope')).toHaveCount(0);
+  expect(previews).toHaveLength(1);
+  await openReview();
+  await expect(page.getByTestId('catalog-import-rows')).toBeVisible();
   await page.keyboard.press('Escape');
   await page.getByTestId('catalog-import-open').click();
   await expect(page.getByTestId('catalog-import-rows')).toBeVisible();
@@ -280,21 +303,17 @@ test('a review link opens the saved scope once and regular import keeps its own 
   await expect(page.getByTestId('catalog-import-rows')).toHaveCount(0);
 });
 
-test('a site channel writer can open a review without querying the model list', async ({ page }) => {
-  await gotoAndEnsureAuth(page, '/settings/profile');
+test('a site channel writer can review a direct link and close it to their profile', async ({ page, context }) => {
+  const login = await context.newPage();
+  await gotoAndEnsureAuth(login, '/settings/profile');
+  await login.close();
+  await mockSiteScopes(page, ['write_channels']);
   let listReads = 0;
   await page.route('**/admin/graphql', async (route) => {
     const { operationName } = route.request().postDataJSON();
-    if (operationName === 'Me') {
-      const response = await route.fetch();
-      const body = await response.json();
-      Object.assign(body.data.me, { isOwner: false, scopes: ['write_channels'] });
-      return route.fulfill({ json: body });
-    }
     if (operationName === 'GetModels') listReads++;
     if (operationName !== 'CatalogImportPreview') return route.fallback();
-    const preview = { rows: [], providers: [], source: 'upstream', upstreamURL: 'https://example.test', revision: 'review' };
-    return route.fulfill({ json: { data: { catalogImportPreview: preview } } });
+    return route.fulfill({ json: { data: { catalogImportPreview: emptyPreview } } });
   });
   const scope = { channels: true, providers: [], ignorePrefix: false };
   await page.goto('/models?catalogReview=' + encodeURIComponent(JSON.stringify(scope)));
@@ -302,4 +321,35 @@ test('a site channel writer can open a review without querying the model list', 
   await expect(page).not.toHaveURL(/catalogReview/);
   await expect(page.getByTestId('catalog-import-open')).toHaveCount(0);
   expect(listReads).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(page).toHaveURL(/\/settings\/profile$/);
+  await expect(page.getByRole('textbox', { name: /email|邮箱/i })).toBeVisible();
+});
+
+test('losing site write access closes an open import and prevents further review requests', async ({ page }) => {
+  const requests: string[] = [];
+  await page.route('**/admin/graphql', (route) => {
+    const { operationName, variables } = route.request().postDataJSON();
+    if (operationName === 'CatalogImportPreview') {
+      if (variables.scope.review) requests.push(operationName);
+      return route.fulfill({ json: { data: { catalogImportPreview: emptyPreview } } });
+    }
+    if (operationName !== 'ApplyCatalogImport') return route.fallback();
+    requests.push(operationName);
+    return route.abort();
+  });
+  await gotoAndEnsureAuth(page, '/models');
+  await page.getByTestId('catalog-import-open').click();
+  await expect(page.getByTestId('catalog-import-rows')).toBeVisible();
+  await mockSiteScopes(page, ['read_channels']);
+  await page.clock.install();
+  await page.clock.fastForward(61_000);
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(page.getByTestId('catalog-import-open')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const scope = { channels: true, providers: [], ignorePrefix: false };
+  await page.goto('/models?catalogReview=' + encodeURIComponent(JSON.stringify(scope)));
+  await expect(page.getByText(/Access Denied|访问被拒绝/i).first()).toBeVisible();
+  expect(requests).toEqual([]);
 });

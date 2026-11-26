@@ -32,6 +32,36 @@ test("only request cross-provider identities for possible channel merges", () =>
   assert.deepEqual(ids(["a/x"], [], true), ["a/x", "x"]);
 });
 
+test("task reads one offer for freshness and pages identities for a potential provider merge", () => {
+  for (const { providers, version, cursors, available } of [
+    { providers: [], version: "1", cursors: [null], available: 1 },
+    { providers: ["source"], version: "1", cursors: [null, "second"], available: 1 },
+    { providers: ["source"], version: "2", cursors: [null, "second"], available: 2 },
+  ]) {
+    const reads = [];
+    let summary;
+    onTask({
+      config: { providers, channels: true, ignorePrefix: true },
+      graphql(document, { after, first, providers: filter }) {
+        if (document.includes("query Channels")) {
+          return { data: { channels: { edges: [{ node: { supportedModels: ["relay/x"] } }], pageInfo: {} } } };
+        }
+        if (document.includes("query Models")) return { data: { models: { edges: [], pageInfo: {} } } };
+        assert.deepEqual(filter, []);
+        if (!providers.length) assert.equal(first, 1);
+        reads.push(after);
+        const quote = after ? offer("relay/x", "dev/x", version) : offer("x");
+        const offers = [{ ...quote, modelID: quote.id, provider: after ? "relay" : "source", rates: [] }];
+        return { data: { modelCatalogOffers: { source: "upstream", offers, nextCursor: after ? null : "second" } } };
+      },
+      kv: { set(_key, value) { summary = JSON.parse(value); } },
+      ui: { setBadge() {} },
+    });
+    assert.deepEqual(reads, cursors);
+    assert.equal(summary.available, available);
+  }
+});
+
 test("pages all sources, counts once per model, publishes only complete upstream results", () => {
   const reads = [];
   let lastSummary, badge, failure;

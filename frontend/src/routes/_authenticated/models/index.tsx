@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react';
 import { createFileRoute, useRouter } from '@tanstack/react-router';
 import { z } from 'zod';
-import { pickFallbackNavUrl } from '@/config/nav-items';
 import { usePermissions } from '@/hooks/usePermissions';
-import { getHiddenNavItems } from '@/stores/sidebarPrefsStore';
 import { RouteGuard } from '@/components/route-guard';
 import ModelsManagement from '@/features/models';
 import { ModelsCatalogImport } from '@/features/models/components/models-catalog-import';
@@ -31,11 +29,18 @@ function ProtectedModels() {
     }
   }, [catalogReview, canReview, navigate]);
 
+  useEffect(() => {
+    return router.history.subscribe(({ action }) => {
+      // Replacing the review URL consumes its scope within the same history entry.
+      if (action.type !== 'REPLACE') setSavedScope(undefined);
+    });
+  }, [router]);
+
   function closeReview() {
     setSavedScope(undefined);
     if (canRead) return;
     if (router.history.canGoBack()) router.history.back();
-    else void navigate({ to: pickFallbackNavUrl('/project/playground', getHiddenNavItems(), false), replace: true });
+    else void navigate({ to: '/settings/profile', search: { oidc_link: undefined }, replace: true });
   }
 
   return (
