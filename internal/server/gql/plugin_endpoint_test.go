@@ -486,6 +486,7 @@ func newPluginEndpointFixture(t *testing.T, name string, catalogHTTP ...*http.Cl
 		SystemService:                  systemSvc,
 		ChannelService:                 channelSvc,
 		CatalogService:                 catalog,
+		ModelService:                   biz.NewModelService(biz.ModelServiceParams{Ent: db, Catalog: catalog, SystemService: systemSvc, ChannelService: channelSvc}),
 		HttpClient:                     client,
 		ChannelOverrideTemplateService: biz.NewChannelOverrideTemplateService(biz.ChannelOverrideTemplateServiceParams{Client: db, ChannelService: channelSvc}),
 		PluginManager:                  manager,

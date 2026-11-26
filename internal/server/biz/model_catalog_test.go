@@ -219,6 +219,39 @@ func TestCatalogImportFallback(t *testing.T) {
 	require.Equal(t, []string{"applied"}, f.apply(t, CatalogImportScope{Providers: []string{"moonshot"}}, fallback, selected))
 }
 
+func TestCatalogReviewAfterProviderRemovesModel(t *testing.T) {
+	f := catalogFixture(t)
+	scope := CatalogImportScope{Providers: []string{"moonshot", "moonshot-ai"}}
+	p := f.preview(t, scope)
+	sel := selection(t, p, "kimi-k3")
+	sel.Prices[0].Provider, sel.Prices[0].Expected = "moonshot", lo.ToPtr(2.9879)
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, sel))
+
+	review := CatalogImportScope{Review: true}
+	delisted := strings.Replace(testCatalog, `"id":"kimi-k3","name"`, `"id":"replacement","name"`, 1)
+	f.changeCatalog(strings.Replace(delisted, `"moonshot-ai":`, `"other":`, 1))
+	require.Empty(t, f.preview(t, review).Rows)
+	for _, tc := range []struct {
+		catalog string
+		changed int
+	}{
+		{delisted, 0},
+		{strings.Replace(delisted, "2.9879", "4", 1), 1},
+	} {
+		f.changeCatalog(tc.catalog)
+		p = f.preview(t, review)
+		require.Len(t, p.Rows, 1)
+		require.Equal(t, "kimi-k3", p.Rows[0].ModelID)
+		require.True(t, p.Rows[0].needsReview)
+		require.Equal(t, tc.changed > 0, p.Rows[0].Changed)
+	}
+	edit := selection(t, p, "kimi-k3")
+	edit.Prices = []CatalogImportPriceInput{{Field: "output", Action: CatalogPriceFix}}
+	require.Equal(t, []string{"applied"}, f.apply(t, review, p, edit))
+	f.changeCatalog(delisted)
+	require.Empty(t, f.preview(t, review).Rows)
+}
+
 func TestCatalogModelTypes(t *testing.T) {
 	for raw, want := range map[string]string{"image": "image_generation", "video": "video_generation", "reranking": "rerank", "image-generation": "image_generation", "embedding": "embedding", "audio": "audio"} {
 		require.Equal(t, want, catalogModelType(raw))

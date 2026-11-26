@@ -14,7 +14,6 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { useModels } from '../context/models-context';
 import {
   useCatalogPreview,
   useCatalogApply,
@@ -275,30 +274,30 @@ function PreviewRows({
   );
 }
 
-export function ModelsCatalogImport() {
+export function ModelsCatalogImport({ reviewScope, onClose }: { reviewScope?: ImportScope; onClose: () => void }) {
   const { t } = useTranslation();
-  const { setOpen } = useModels();
   const [mode, setMode] = useState('channels');
   const [provider, setProvider] = useState('');
   const [ignorePrefix, setIgnorePrefix] = useState(false);
   const apply = useCatalogApply();
   const outcomes = apply.data ?? [];
   const scope = useMemo<ImportScope>(
-    () => ({
+    () => reviewScope ?? {
       channels: mode === 'channels',
       providers: mode === 'provider' && provider ? [provider] : [],
       ignorePrefix: mode === 'channels' && ignorePrefix,
-    }),
-    [mode, provider, ignorePrefix]
+    },
+    [reviewScope, mode, provider, ignorePrefix]
   );
   const preview = useCatalogPreview(scope);
-  const data = preview.data;
+  const waitingForReview = !!reviewScope && !preview.isFetchedAfterMount;
+  const data = waitingForReview ? undefined : preview.data;
   const refreshingAfterError = apply.isError && preview.fetchStatus !== 'idle';
   return (
     <Dialog
       open
       onOpenChange={(v) => {
-        if (!v) setOpen(null);
+        if (!v) onClose();
       }}
     >
       <DialogContent className='flex h-[min(85dvh,52rem)] max-h-[95dvh] flex-col overflow-hidden sm:max-w-4xl'>
@@ -306,45 +305,56 @@ export function ModelsCatalogImport() {
           <DialogTitle>{t('models.import.title')}</DialogTitle>
           <DialogDescription>{t('models.import.description')}</DialogDescription>
         </DialogHeader>
-        <div className='flex flex-wrap items-center gap-2'>
-          <select
-            aria-label={t('models.import.scopeLabel')}
-            className={selectStyle}
-            value={mode}
-            onChange={(e) => {
-              setMode(e.target.value);
-              apply.reset();
-            }}
-          >
-            {['channels', 'provider'].map((m) => (
-              <option key={m} value={m}>
-                {t('models.import.scope.' + m)}
-              </option>
-            ))}
-          </select>
-          {mode === 'provider' && (
+        {reviewScope ? (
+          <p className='text-muted-foreground text-sm' data-testid='catalog-review-scope'>
+            {[
+              t('models.import.followedPrices'),
+              ...(scope.channels ? [t('models.import.scope.channels')] : []),
+              ...scope.providers,
+              ...(scope.ignorePrefix ? [t('models.import.ignorePrefix')] : []),
+            ].join(' · ')}
+          </p>
+        ) : (
+          <div className='flex flex-wrap items-center gap-2'>
             <select
-              aria-label={t('models.import.provider')}
+              aria-label={t('models.import.scopeLabel')}
               className={selectStyle}
-              value={provider}
+              value={mode}
               onChange={(e) => {
-                setProvider(e.target.value);
+                setMode(e.target.value);
                 apply.reset();
               }}
             >
-              <option value=''>{t('models.import.pickProvider')}</option>
-              {(data?.providers ?? (provider ? [provider] : [])).map((p) => (
-                <option key={p}>{p}</option>
+              {['channels', 'provider'].map((m) => (
+                <option key={m} value={m}>
+                  {t('models.import.scope.' + m)}
+                </option>
               ))}
             </select>
-          )}
-          {mode === 'channels' && (
-            <label className='flex items-center gap-2 text-sm'>
-              <Checkbox checked={ignorePrefix} onCheckedChange={(v) => setIgnorePrefix(v === true)} />
-              {t('models.import.ignorePrefix')}
-            </label>
-          )}
-        </div>
+            {mode === 'provider' && (
+              <select
+                aria-label={t('models.import.provider')}
+                className={selectStyle}
+                value={provider}
+                onChange={(e) => {
+                  setProvider(e.target.value);
+                  apply.reset();
+                }}
+              >
+                <option value=''>{t('models.import.pickProvider')}</option>
+                {(data?.providers ?? (provider ? [provider] : [])).map((p) => (
+                  <option key={p}>{p}</option>
+                ))}
+              </select>
+            )}
+            {mode === 'channels' && (
+              <label className='flex items-center gap-2 text-sm'>
+                <Checkbox checked={ignorePrefix} onCheckedChange={(v) => setIgnorePrefix(v === true)} />
+                {t('models.import.ignorePrefix')}
+              </label>
+            )}
+          </div>
+        )}
         {outcomes.length > 0 && (
           <div role='status' className='max-h-24 overflow-y-auto text-sm'>
             {t('models.import.applied', { count: outcomes.filter((r) => r.status === 'applied').length })}
@@ -362,7 +372,7 @@ export function ModelsCatalogImport() {
             {t('models.import.unknownResult')} {apply.error.message}
           </p>
         )}
-        {(preview.isPending || apply.isPending || refreshingAfterError) && <p>{t('common.loading')}</p>}
+        {!preview.error && (preview.isPending || waitingForReview || apply.isPending || refreshingAfterError) && <p>{t('common.loading')}</p>}
         {preview.error && (
           <div role='alert'>
             {preview.error.message}

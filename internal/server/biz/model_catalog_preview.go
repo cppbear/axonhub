@@ -1,4 +1,4 @@
-// 职责: 比较全局模型与服务商目录，生成手动导入的候选清单。
+// 职责: 比较全局模型与服务商目录，生成手动导入和跟随价复核的候选清单。
 // 关联文件:
 //
 //	internal/server/biz/catalog.go
@@ -40,6 +40,7 @@ type CatalogImportScope struct {
 	Channels     bool
 	Providers    []string
 	IgnorePrefix bool
+	Review       bool
 }
 
 type CatalogImportTier struct {
@@ -87,6 +88,7 @@ type CatalogImportRow struct {
 	Members                []CatalogImportMember
 	Routes                 []CatalogImportRoute
 	Archived, Changed      bool
+	needsReview            bool
 	Offers                 []*CatalogImportOffer
 	Preferred              *CatalogImportOffer
 	Prices                 []CatalogImportLocalPrice
@@ -368,7 +370,7 @@ func (o *CatalogImportOffer) rate(field ReferencePriceField) *CatalogImportRate 
 }
 
 func (svc *ModelService) CatalogImportPreview(ctx context.Context, scope CatalogImportScope) (*CatalogImportPreview, error) {
-	snapshot, err := svc.catalog.snapshot(ctx, false, false)
+	snapshot, err := svc.catalog.snapshot(ctx, false, scope.Review)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +412,7 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 	}
 	publicURL.User, publicURL.RawQuery, publicURL.Fragment, publicURL.ForceQuery = nil, "", "", false
 	preview := &CatalogImportPreview{UpstreamURL: publicURL.String(), Source: snapshot.Source, Revision: hex.EncodeToString(revision[:]), Providers: idx.providers, Rows: []*CatalogImportRow{}}
-	if !scope.Channels && len(scope.Providers) == 0 {
+	if !scope.Channels && !scope.Review && len(scope.Providers) == 0 {
 		return preview, nil
 	}
 	db := svc.entFromContext(ctx)
@@ -451,15 +453,15 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 		}
 	}
 	aliases, mergeTargets := idx.groupModelIDs(allIDs, importedIDs, channelRoutes, scope.IgnorePrefix)
-	// Keep missing followed offers reachable under their existing local model ID.
+	// Review follows saved prices even outside the providers selected for discovery.
 	selectedProviders := lo.Intersect(scope.Providers, idx.providers)
-	if snapshot.Source == catalogSourceUpstream && len(selectedProviders) > 0 {
+	if scope.Review || (snapshot.Source == catalogSourceUpstream && len(selectedProviders) > 0) {
 		for _, m := range local {
 			if aliases[m.ModelID] != nil || m.Status == model.StatusArchived || m.ModelCard == nil {
 				continue
 			}
 			for _, binding := range m.ModelCard.CatalogPrices {
-				if binding.Follow && slices.Contains(selectedProviders, binding.Provider) && idx.offers[catalogOfferKey{binding.Provider, binding.ModelID}] == nil {
+				if binding.Follow && (scope.Review || (slices.Contains(selectedProviders, binding.Provider) && idx.offers[catalogOfferKey{binding.Provider, binding.ModelID}] == nil)) {
 					aliases[m.ModelID] = []string{m.ModelID}
 					break
 				}
@@ -502,7 +504,10 @@ func (svc *ModelService) catalogPreviewFromSnapshot(ctx context.Context, scope C
 				return nil, err
 			}
 			row.Prices = CatalogLocalPrices(m.ModelCard)
-			idx.addBoundOffers(row, len(providerOffers[id]) == 0)
+			idx.addBoundOffers(row, len(providerOffers[id]) == 0, snapshot.Source)
+			if scope.Review && (row.Archived || (!row.Changed && !row.needsReview)) {
+				continue
+			}
 		} else if row.Preferred != nil {
 			row.Name = row.Preferred.Name
 		}
@@ -550,13 +555,16 @@ func (idx *catalogIndex) groupModelIDs(allIDs map[string]bool, importedIDs map[s
 	return aliases, mergeTargets
 }
 
-func (idx *catalogIndex) addBoundOffers(row *CatalogImportRow, preferFollowed bool) {
+func (idx *catalogIndex) addBoundOffers(row *CatalogImportRow, preferFollowed bool, source string) {
 	for _, p := range row.Prices {
 		if p.Provider == "" {
 			continue
 		}
 		o := idx.offers[catalogOfferKey{p.Provider, p.ModelID}]
 		if o == nil {
+			if p.Follow && source == catalogSourceUpstream && slices.Contains(idx.providers, p.Provider) {
+				row.needsReview = true
+			}
 			continue
 		}
 		row.Offers = append(row.Offers, o)
@@ -567,7 +575,14 @@ func (idx *catalogIndex) addBoundOffers(row *CatalogImportRow, preferFollowed bo
 			continue
 		}
 		rate := o.rate(p.Field)
-		if rate != nil && rate.Base != nil && p.Canonical == o.Canonical && (p.Value == nil || *p.Value != *rate.Base) {
+		if rate == nil || rate.Base == nil {
+			row.needsReview = true
+			continue
+		}
+		differentPrice := p.Value == nil || *p.Value != *rate.Base
+		if p.Canonical != o.Canonical {
+			row.needsReview = row.needsReview || p.Canonical != "" || differentPrice
+		} else if differentPrice {
 			row.Changed = true
 		}
 	}

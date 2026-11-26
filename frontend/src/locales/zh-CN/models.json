@@ -289,6 +289,7 @@
   "models.import.title": "导入与同步",
   "models.import.description": "勾选要写入全局模型库的模型和参考价。新模型默认停用。",
   "models.import.scopeLabel": "模型来源",
+  "models.import.followedPrices": "已跟随的参考价",
   "models.import.scope.channels": "渠道已配置的模型",
   "models.import.scope.provider": "按服务商选择模型",
   "models.import.provider": "服务商",

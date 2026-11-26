@@ -11,6 +11,7 @@ export interface ImportScope {
   channels: boolean;
   providers: string[];
   ignorePrefix: boolean;
+  review?: boolean;
 }
 export interface ImportRate {
   field: ReferencePriceField;
@@ -99,7 +100,7 @@ export function useCatalogPreview(scope: ImportScope) {
     queryFn: async ({ signal }) =>
       (await graphqlRequest<{ catalogImportPreview: CatalogPreview }>(previewQuery, { scope }, undefined, { signal })).catalogImportPreview,
     refetchOnWindowFocus: false,
-    staleTime: 60_000,
+    staleTime: scope.review ? 0 : 60_000,
   });
 }
 export function useCatalogApply() {

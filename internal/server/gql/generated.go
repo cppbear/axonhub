@@ -76931,7 +76931,11 @@ func (ec *executionContext) unmarshalInputCatalogImportScope(ctx context.Context
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"channels", "providers", "ignorePrefix"}
+	if _, present := asMap["review"]; !present {
+		asMap["review"] = false
+	}
+
+	fieldsInOrder := [...]string{"channels", "providers", "ignorePrefix", "review"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -76959,6 +76963,13 @@ func (ec *executionContext) unmarshalInputCatalogImportScope(ctx context.Context
 				return it, err
 			}
 			it.IgnorePrefix = data
+		case "review":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("review"))
+			data, err := ec.unmarshalNBoolean2bool(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Review = data
 		}
 	}
 

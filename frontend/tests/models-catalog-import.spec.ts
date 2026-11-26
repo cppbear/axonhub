@@ -251,3 +251,29 @@ test('a lost apply response requires a refreshed preview before retrying', async
   await expect(dialog.getByTestId('catalog-import-apply')).toBeDisabled();
   expect(submissions).toBe(1);
 });
+
+test('a review link opens the saved scope once and regular import keeps its own scope', async ({ page }) => {
+  const scope = { channels: false, providers: ['moonshot', 'openai'], ignorePrefix: false };
+  const previews: unknown[] = [];
+  await page.route('**/admin/graphql', async (route) => {
+    const body = route.request().postDataJSON();
+    if (body.operationName !== 'CatalogImportPreview') return route.fallback();
+    previews.push(body.variables.scope);
+    return route.fulfill({ json: { data: { catalogImportPreview: {
+      rows: [], providers: scope.providers, source: 'upstream', upstreamURL: 'https://example.test', revision: 'review',
+    } } } });
+  });
+  await gotoAndEnsureAuth(page, '/models');
+  await page.goto('/models?catalogReview=' + encodeURIComponent(JSON.stringify(scope)));
+  await expect(page.getByTestId('catalog-review-scope')).toContainText('moonshot · openai');
+  await expect(page.getByTestId('catalog-import-rows')).toBeVisible();
+  expect(previews).toEqual([{ ...scope, review: true }]);
+  await expect(page).not.toHaveURL(/catalogReview/);
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await expect(page.getByTestId('catalog-import-open')).toBeVisible();
+  await expect(page.getByTestId('catalog-import-rows')).toHaveCount(0);
+  await page.getByTestId('catalog-import-open').click();
+  await expect(page.getByTestId('catalog-import-rows')).toBeVisible();
+  expect(previews.at(-1)).toEqual({ channels: true, providers: [], ignorePrefix: false });
+});
