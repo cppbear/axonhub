@@ -1,4 +1,4 @@
-export function lastSegment(id) {
+function lastSegment(id) {
   return id.slice(id.lastIndexOf("/") + 1) || id;
 }
 
@@ -29,11 +29,28 @@ function compatible(ids, exact, canonical) {
   return true;
 }
 
-export function countAvailable(candidates, imported, channels, ignorePrefix, offers) {
+function groupCandidates(candidates, imported, channels, ignorePrefix) {
   const groups = new Map();
   for (const id of candidates) {
     if (!imported.has(id)) append(groups, ignorePrefix && channels.has(id) ? lastSegment(id) : id, id);
   }
+  return groups;
+}
+
+export function possibleMergeIDs(channels, imported, hasProviders) {
+  const ids = new Set();
+  for (const [target, members] of groupCandidates(channels, imported, channels, true)) {
+    // A subscribed provider can still contribute the bare target for a prefixed channel ID.
+    const canMerge = members.length > 1 || (hasProviders && members[0] !== target);
+    if (!canMerge || imported.has(target)) continue;
+    ids.add(target);
+    for (const member of members) ids.add(member);
+  }
+  return ids;
+}
+
+export function countAvailable(candidates, imported, channels, ignorePrefix, offers) {
+  const groups = groupCandidates(candidates, imported, channels, ignorePrefix);
   if (!ignorePrefix) return groups.size;
   const exact = new Map();
   const canonical = new Map();

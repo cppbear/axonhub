@@ -3,6 +3,7 @@
 //   frontend/src/features/models/components/models-catalog-import.tsx
 //   frontend/src/features/models/components/models-catalog-prices.tsx
 //   frontend/src/features/models/data/catalog-import.ts
+//   frontend/src/routes/_authenticated/models/index.tsx
 // 注意事项:
 //   导入提交使用隔离响应。
 import { expect, test } from '@playwright/test';
@@ -270,10 +271,35 @@ test('a review link opens the saved scope once and regular import keeps its own 
   expect(previews).toEqual([{ ...scope, review: true }]);
   await expect(page).not.toHaveURL(/catalogReview/);
   await page.keyboard.press('Escape');
-  await page.reload();
-  await expect(page.getByTestId('catalog-import-open')).toBeVisible();
-  await expect(page.getByTestId('catalog-import-rows')).toHaveCount(0);
   await page.getByTestId('catalog-import-open').click();
   await expect(page.getByTestId('catalog-import-rows')).toBeVisible();
   expect(previews.at(-1)).toEqual({ channels: true, providers: [], ignorePrefix: false });
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await expect(page.getByTestId('catalog-import-open')).toBeVisible();
+  await expect(page.getByTestId('catalog-import-rows')).toHaveCount(0);
+});
+
+test('a site channel writer can open a review without querying the model list', async ({ page }) => {
+  await gotoAndEnsureAuth(page, '/settings/profile');
+  let listReads = 0;
+  await page.route('**/admin/graphql', async (route) => {
+    const { operationName } = route.request().postDataJSON();
+    if (operationName === 'Me') {
+      const response = await route.fetch();
+      const body = await response.json();
+      Object.assign(body.data.me, { isOwner: false, scopes: ['write_channels'] });
+      return route.fulfill({ json: body });
+    }
+    if (operationName === 'GetModels') listReads++;
+    if (operationName !== 'CatalogImportPreview') return route.fallback();
+    const preview = { rows: [], providers: [], source: 'upstream', upstreamURL: 'https://example.test', revision: 'review' };
+    return route.fulfill({ json: { data: { catalogImportPreview: preview } } });
+  });
+  const scope = { channels: true, providers: [], ignorePrefix: false };
+  await page.goto('/models?catalogReview=' + encodeURIComponent(JSON.stringify(scope)));
+  await expect(page.getByTestId('catalog-import-rows')).toBeVisible();
+  await expect(page).not.toHaveURL(/catalogReview/);
+  await expect(page.getByTestId('catalog-import-open')).toHaveCount(0);
+  expect(listReads).toBe(0);
 });

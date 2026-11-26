@@ -2,6 +2,7 @@
 // 关联文件:
 //   frontend/src/features/models/data/catalog-import.ts
 //   frontend/src/features/models/components/models-dialogs.tsx
+//   frontend/src/routes/_authenticated/models/index.tsx
 //   frontend/src/locales/en.json
 //   frontend/src/locales/zh.json
 // 注意事项:

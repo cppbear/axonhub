@@ -84,12 +84,15 @@ func (svc *ModelService) ApplyCatalogImport(ctx context.Context, scope CatalogIm
 	used := map[string]bool{}
 	result := make([]CatalogImportOutcome, 0, len(selections))
 	for _, selection := range selections {
+		row := rows[selection.ModelID]
 		status := CatalogApplied
 		switch {
 		case slices.ContainsFunc(selection.Members, func(m CatalogImportMember) bool { return used[m.ID] }):
 			status = CatalogConflict
 		case sourceChanged:
 			status = CatalogChanged
+		case scope.Review && selection.Version != "" && (row == nil || row.ModelID != selection.ModelID):
+			status = CatalogConflict
 		default:
 			err := svc.RunInTransaction(ctx, func(ctx context.Context) error { return svc.applyCatalogRow(ctx, preview.Source, rows, selection) })
 			switch {

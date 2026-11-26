@@ -1,4 +1,4 @@
-import { countAvailable, lastSegment } from "./matching.js";
+import { countAvailable, possibleMergeIDs } from "./matching.js";
 
 const channelsQuery = `query Channels($after: Cursor) {
   channels(first: 100, after: $after, where: {statusIn: [enabled, disabled]}) {
@@ -17,8 +17,7 @@ const offersQuery = `query Offers($providers: [String!], $after: String, $refres
   }
 }`;
 
-function query(ctx, document, variables) {
-  const result = ctx.graphql(document, variables);
+function queryData(result) {
   if (result.errors?.length) throw new Error(result.errors[0].message);
   return result.data;
 }
@@ -26,7 +25,7 @@ function query(ctx, document, variables) {
 function readNodes(ctx, document, field, visit) {
   let after = null;
   do {
-    const page = query(ctx, document, { after })[field];
+    const page = queryData(ctx.graphql(document, { after }))[field];
     for (const { node } of page.edges) visit(node);
     if (page.pageInfo.hasNextPage && !page.pageInfo.endCursor) throw new Error("Incomplete " + field + " page");
     after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
@@ -60,47 +59,50 @@ export function onTask(ctx) {
     }
   });
 
-  const candidates = new Set(channels);
-  const changed = new Set();
-  // Only channel IDs and their possible merge targets need identity evidence.
-  const mergeIDs = new Set();
-  if (scope.ignorePrefix) {
-    for (const id of channels) {
-      mergeIDs.add(id);
-      mergeIDs.add(lastSegment(id));
-    }
-  }
-  const identities = [];
+  const mergeIDs = scope.ignorePrefix ? possibleMergeIDs(channels, imported, providers.length > 0) : new Set();
   // An empty provider filter means the whole catalog. If only exact channel IDs
   // matter, a single upstream offer suffices to verify freshness.
   const checkSourceOnly = !mergeIDs.size && sources.size === 0;
   const filter = mergeIDs.size ? [] : [...sources];
-  let after = null;
-  let fetchedAt;
-  do {
-    const { modelCatalogOffers: page } = query(ctx, offersQuery, {
-      providers: filter, after, refresh: after === null, first: checkSourceOnly ? 1 : 100,
-    });
-    if (page.source !== "upstream") throw new Error("The upstream model catalog is unavailable");
-    fetchedAt = page.fetchedAt;
-    for (const offer of page.offers) {
-      if (providers.includes(offer.provider)) candidates.add(offer.modelID);
-      if (mergeIDs.has(offer.modelID) || mergeIDs.has(offer.canonical)) {
-        identities.push({ id: offer.modelID, canonical: offer.canonical, identity: offer.identity });
+
+  function scanCatalog(restartOnChange) {
+    const candidates = new Set(channels);
+    const changed = new Set();
+    const identities = [];
+    let after = null;
+    let fetchedAt;
+    do {
+      const result = ctx.graphql(offersQuery, {
+        providers: filter, after, refresh: after === null, first: checkSourceOnly ? 1 : 100,
+      });
+      if (restartOnChange && after && result.errors?.[0]?.message === "model catalog snapshot changed, restart pagination") {
+        return scanCatalog(false);
       }
-      for (const binding of followed.get(JSON.stringify([offer.provider, offer.modelID])) ?? []) {
-        const { price } = binding;
-        const rate = offer.rates.find((rate) => rate.field === price.field);
-        if (price.canonical === offer.canonical && rate?.base != null && rate.base !== price.value) {
-          changed.add(binding.modelID);
+      const page = queryData(result).modelCatalogOffers;
+      if (page.source !== "upstream") throw new Error("The upstream model catalog is unavailable");
+      fetchedAt = page.fetchedAt;
+      for (const offer of page.offers) {
+        if (providers.includes(offer.provider)) candidates.add(offer.modelID);
+        if (mergeIDs.has(offer.modelID) || mergeIDs.has(offer.canonical)) {
+          identities.push({ id: offer.modelID, canonical: offer.canonical, identity: offer.identity });
+        }
+        for (const binding of followed.get(JSON.stringify([offer.provider, offer.modelID])) ?? []) {
+          const { price } = binding;
+          const rate = offer.rates.find((rate) => rate.field === price.field);
+          if (price.canonical === offer.canonical && rate?.base != null && rate.base !== price.value) {
+            changed.add(binding.modelID);
+          }
         }
       }
-    }
-    after = checkSourceOnly ? null : page.nextCursor;
-  } while (after);
+      after = checkSourceOnly ? null : page.nextCursor;
+    } while (after);
 
-  const available = countAvailable(candidates, imported, channels, scope.ignorePrefix, identities);
-  const count = available + changed.size;
-  ctx.kv.set("summary", JSON.stringify({ scope, fetchedAt, available, changed: changed.size }));
+    const available = countAvailable(candidates, imported, channels, scope.ignorePrefix, identities);
+    return { scope, fetchedAt, available, changed: changed.size };
+  }
+
+  const summary = scanCatalog(true);
+  const count = summary.available + summary.changed;
+  ctx.kv.set("summary", JSON.stringify(summary));
   ctx.ui.setBadge({ type: "action", key: "catalog-check" }, count ? { count } : null);
 }

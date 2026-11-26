@@ -219,6 +219,25 @@ func TestCatalogImportFallback(t *testing.T) {
 	require.Equal(t, []string{"applied"}, f.apply(t, CatalogImportScope{Providers: []string{"moonshot"}}, fallback, selected))
 }
 
+func TestCatalogReviewSkipsModelWhenPriceRecovers(t *testing.T) {
+	f := catalogFixture(t)
+	scope := CatalogImportScope{Providers: []string{"moonshot-ai"}}
+	p := f.preview(t, scope)
+	require.Equal(t, []string{"applied"}, f.apply(t, scope, p, selection(t, p, "kimi-k3")))
+
+	scope.Review = true
+	f.changeCatalog(strings.Replace(testCatalog, `"input":3,"output":15`, `"input":4,"output":15`, 1))
+	p = f.preview(t, scope)
+	fix, add := selection(t, p, "kimi-k3"), selection(t, p, "new-model")
+	fix.Prices = []CatalogImportPriceInput{{Field: "input", Action: CatalogPriceFix}}
+	add.Developer = "moonshot"
+	f.changeCatalog(testCatalog)
+	require.Equal(t, []string{"conflict", "applied"}, f.apply(t, scope, p, fix, add))
+	card := f.db.Model.Query().Where(model.ModelIDEQ("kimi-k3")).OnlyX(f.ctx).ModelCard
+	require.True(t, card.CatalogPrices["input"].Follow)
+	require.Equal(t, 3.0, *card.ReferencePrice("input"))
+}
+
 func TestCatalogReviewAfterProviderRemovesModel(t *testing.T) {
 	f := catalogFixture(t)
 	scope := CatalogImportScope{Providers: []string{"moonshot", "moonshot-ai"}}

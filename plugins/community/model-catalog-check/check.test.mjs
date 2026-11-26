@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { onTask } from "./plugin.js";
-import { countAvailable } from "./matching.js";
+import { countAvailable, possibleMergeIDs } from "./matching.js";
 
 function offer(id, canonical = "dev/x", version = "1") {
   return { id, canonical, identity: JSON.stringify([canonical, version, ""]) };
@@ -20,6 +20,16 @@ test("prefix matching uses the native importer's identity and target occupancy r
   const aliases = new Set(["dev/x", "other/x"]);
   assert.equal(countAvailable(aliases, new Set(), aliases, true, [offer("other/x")]), 1);
   assert.equal(countAvailable(aliases, new Set(), aliases, true, [offer("other/x"), offer("second/x")]), 2);
+});
+
+test("only request cross-provider identities for possible channel merges", () => {
+  const ids = (channels, imported, hasProviders) => [...possibleMergeIDs(new Set(channels), new Set(imported), hasProviders)].sort();
+  assert.deepEqual(ids(["x"], [], true), []);
+  assert.deepEqual(ids(["a/x"], [], false), []);
+  assert.deepEqual(ids(["a/x", "b/x"], ["a/x", "b/x"], true), []);
+  assert.deepEqual(ids(["a/x", "b/x"], ["x"], true), []);
+  assert.deepEqual(ids(["a/x", "b/x"], [], false), ["a/x", "b/x", "x"]);
+  assert.deepEqual(ids(["a/x"], [], true), ["a/x", "x"]);
 });
 
 test("pages all sources, counts once per model, publishes only complete upstream results", () => {
@@ -41,31 +51,45 @@ test("pages all sources, counts once per model, publishes only complete upstream
         return { data: { models: connection([model]) } };
       }
       reads.push(variables);
-      if (!next && failure === "cursor") return { errors: [{ message: "snapshot changed" }] };
+      if (!next && (failure === "cursor" || failure === "once")) {
+        if (failure === "once") failure = "recovered";
+        return { errors: [{ message: "model catalog snapshot changed, restart pagination" }] };
+      }
+      const changedOffer = { provider: "original", modelID: "bound", canonical: "dev/x", rates: [{ field: "input", base: 0 }, { field: "output", base: 4 }] };
       const offers = next ? [{ provider: "extra", modelID: "shared", rates: [] }] : [
-        { provider: "original", modelID: "bound", canonical: "dev/x", rates: [{ field: "input", base: 0 }, { field: "output", base: 4 }] },
+        changedOffer,
         { provider: "original", modelID: "not-subscribed", rates: [] },
       ];
+      if (next && failure === "once") offers.push({ provider: "extra", modelID: "withdrawn", rates: [] }, changedOffer);
+      if (!next && failure === "recovered") offers.length = 0;
       return { data: { modelCatalogOffers: { source: !next && failure === "fallback" ? "fallback" : "upstream", fetchedAt: "2026-11-26", offers, nextCursor: next ? "second" : null } } };
     },
     kv: { set(_key, value) { lastSummary = JSON.parse(value); } },
     ui: { setBadge(_target, value) { if (failure === "badge") throw Error("badge failed"); badge = value; } },
   };
   onTask(ctx);
-  const first = lastSummary;
-  assert.deepEqual(first, { scope: { channels: true, providers: ["extra"], ignorePrefix: false }, fetchedAt: "2026-11-26", available: 2, changed: 1 });
+  assert.deepEqual(lastSummary, { scope: { channels: true, providers: ["extra"], ignorePrefix: false }, fetchedAt: "2026-11-26", available: 2, changed: 1 });
   assert.deepEqual(badge, { count: 3 });
   assert.deepEqual(reads.map((r) => [r.refresh, r.after, r.providers]), [[true, null, ["extra", "original"]], [false, "second", ["extra", "original"]]]);
+  failure = "once";
+  reads.length = 0;
+  onTask(ctx);
+  assert.deepEqual(reads.map((r) => r.after), [null, "second", null, "second"]);
+  assert.equal(lastSummary.available, 2);
+  assert.equal(lastSummary.changed, 0);
+  const previous = lastSummary;
   ctx.config = { channels: false, providers: [] };
   for (failure of ["cursor", "fallback"]) {
+    reads.length = 0;
     assert.throws(() => onTask(ctx));
-    assert.equal(lastSummary, first);
-    assert.deepEqual(badge, { count: 3 });
+    assert.equal(reads.length, failure === "cursor" ? 4 : 2);
+    assert.equal(lastSummary, previous);
+    assert.deepEqual(badge, { count: 2 });
   }
   failure = "badge";
   assert.throws(() => onTask(ctx), /badge failed/);
   assert.deepEqual(lastSummary.scope, { channels: false, providers: [], ignorePrefix: false });
-  assert.deepEqual(badge, { count: 3 });
+  assert.deepEqual(badge, { count: 2 });
   failure = undefined;
   onTask(ctx);
   assert.deepEqual(badge, { count: 1 });
